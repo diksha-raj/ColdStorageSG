@@ -1,0 +1,43 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+
+@theme {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+
+  /* Cool cold-chain palette */
+  --color-ink: #0f172a;
+  --color-muted: #64748b;
+  --color-line: #e2e8f0;
+  --color-canvas: #f6f9fb;
+  --color-brand: #0d9488; /* teal */
+  --color-brand-dark: #0f766e;
+  --color-brand-soft: #e6f6f4;
+  --color-ice: #e0f2fe;
+
+  /* Status: pass = green, flagged / pending = amber, breach / rejected = red */
+  --color-pass: #15803d;
+  --color-pass-soft: #dcfce7;
+  --color-warn: #b45309;
+  --color-warn-soft: #fef3c7;
+  --color-fail: #b91c1c;
+  --color-fail-soft: #fee2e2;
+}
+
+body {
+  @apply bg-canvas text-ink font-sans antialiased;
+}
+
+/* Printable certificate: A4, white page, keep status colours (browsers drop backgrounds by default). */
+@media print {
+  @page {
+    size: A4;
+    margin: 14mm;
+  }
+  body {
+    background: white;
+  }
+  * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+}

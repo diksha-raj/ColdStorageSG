@@ -1,0 +1,20 @@
+{
+  "name": "coldchainsg",
+  "private": true,
+  "workspaces": [
+    "contracts",
+    "services/*",
+    "frontend"
+  ],
+  "scripts": {
+    "chain": "npm run node -w contracts",
+    "deploy": "npm run deploy:local -w contracts && tsx services/common/scripts/reset-db.ts",
+    "test:contracts": "npm test -w contracts",
+    "seed": "tsx services/common/scripts/seed-demo.ts",
+    "web": "npm run dev -w frontend",
+    "test:all": "bash scripts/test-all.sh"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.15"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "@coldchainsg/certificate-service",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@coldchainsg/common": "*",
+    "ethers": "^6.17.0"
+  }
+}

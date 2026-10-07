@@ -1,0 +1,18 @@
+{
+  "name": "@coldchainsg/identity-service",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@coldchainsg/common": "*",
+    "ethers": "^6.17.0",
+    "siwe": "^3.0.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.15"
+  }
+}

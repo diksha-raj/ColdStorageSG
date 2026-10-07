@@ -1,0 +1,10 @@
+node_modules/
+.env
+dist/
+contracts/artifacts/
+contracts/cache/
+contracts/types/
+.DS_Store
+deployments/localhost.json
+frontend/e2e/screenshots/
+deployments/e2e.json
