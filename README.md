@@ -18,7 +18,7 @@ DBA5102 Blockchain course project. Design decisions: [docs/decisions.md](docs/de
 ## Prerequisites
 
 - Node 20+ (developed on Node 26)
-- Postgres 16. On this machine it runs on **port 5433**, because another Postgres already owns 5432:
+- Postgres 16.
   `brew install postgresql@16`, set `port = 5433` in `/opt/homebrew/var/postgresql@16/postgresql.conf`, `brew services start postgresql@16`, `createdb -p 5433 coldchainsg`
 
 ## Run locally
