@@ -85,7 +85,7 @@ export async function findEvent(contractName: string, txHash: string, eventName:
 // ---- Roles ----------------------------------------------------------------
 
 export const PARTICIPANT_ROLES = [
-  "IMPORTER",
+  "SUPPLIER",
   "CARRIER",
   "HANDLER",
   "COLD_STORE",

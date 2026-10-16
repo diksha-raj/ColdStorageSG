@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.34;
 
 import {ParticipantRegistry} from "./ParticipantRegistry.sol";
 
@@ -9,7 +9,7 @@ import {ParticipantRegistry} from "./ParticipantRegistry.sol";
 /// Containers and batches share one id space ("units"), so initiateTransfer / acceptTransfer
 /// work on either. The fixed route is:
 ///
-///   Container: Origin (importer) -> Carrier -> Handler -> ColdStore -> split into batches
+///   Container: Origin (supplier) -> Carrier -> Handler -> ColdStore -> split into batches
 ///   Batch:     (in container) ... ColdStore -> Truck -> Delivered (buyer)
 ///
 /// The stage number doubles as the sensor leg number: 1 Carrier, 2 Handler, 3 ColdStore, 4 Truck.
@@ -30,7 +30,7 @@ contract ShipmentCustody {
 
     // Order matters: stage N == leg N for legs 1-4.
     enum Stage {
-        Origin, //    0  importer dispatches on behalf of the off-platform supplier
+        Origin, //    0  the supplier dispatches from origin
         Carrier, //   1
         Handler, //   2
         ColdStore, // 3
@@ -41,12 +41,14 @@ contract ShipmentCustody {
     struct Unit {
         Kind kind;
         uint256 containerId; // a batch's parent; a container's own id
-        address importer;
+        address supplier;
         address custodian;
         address pendingTo; // set by initiateTransfer, cleared by acceptTransfer
         Stage stage;
         uint64 splitAt; // containers only; 0 until split at the cold store
         bytes32 sensorId; // container sensor covers legs 1-3; batch sensor covers leg 4
+        bytes11 code; // ISO 6346 container number, e.g. "CCSU4831207"; a batch carries its container's
+        bytes32 sealNumber; // containers only: the seal the supplier applied before dispatch
         // Batch-only fields
         address buyer;
         address inspector;
@@ -95,8 +97,10 @@ contract ShipmentCustody {
     mapping(uint256 => uint256[]) internal batchesOf;
     mapping(uint256 => mapping(uint8 => Checkpoint)) internal checkpoints; // [unit][stage it closes]
     mapping(uint256 => Check) internal pendingChecks; // sender's outgoing check while a transfer is pending
+    mapping(bytes11 => uint256) public activeContainerByCode; // container number => container until it's split
 
-    event ContainerCreated(uint256 indexed containerId, address indexed importer, bytes32 sensorId);
+    event ContainerCreated(uint256 indexed containerId, address indexed supplier, bytes32 sensorId, bytes11 code);
+    event SealRecorded(uint256 indexed containerId, bytes32 sealNumber);
     event BatchAdded(
         uint256 indexed batchId, uint256 indexed containerId, address indexed buyer, address inspector, bytes32 sensorId
     );
@@ -116,23 +120,95 @@ contract ShipmentCustody {
         _;
     }
 
-    // ---- Setup (importer) ---------------------------------------------------
+    // ---- Setup (supplier) ---------------------------------------------------
 
-    function createContainer(bytes32 sensorId) external whenSystemActive returns (uint256 id) {
-        require(registry.hasRole(registry.IMPORTER(), msg.sender), "not an importer");
+    /// @param code The physical container's ISO 6346 number, or 0 to have one generated.
+    function createContainer(bytes32 sensorId, bytes11 code) external whenSystemActive returns (uint256 id) {
+        require(registry.hasRole(registry.SUPPLIER(), msg.sender), "not a supplier");
         require(sensorId != bytes32(0), "sensor required");
 
         id = nextId++;
+        if (code == bytes11(0)) {
+            code = containerCode(id);
+        } else {
+            require(isValidContainerCode(code), "invalid container number");
+            require(bytes3(code) != bytes3("CCS"), "owner code CCS is reserved for generated numbers");
+        }
+        // Real containers are reused, so a number is only blocked while it's on an active shipment.
+        require(activeContainerByCode[code] == 0, "container number already in use");
+        activeContainerByCode[code] = id;
+
         Unit storage c = units[id];
+        c.code = code;
         c.kind = Kind.Container;
         c.containerId = id;
-        c.importer = msg.sender;
+        c.supplier = msg.sender;
         c.custodian = msg.sender;
         c.stage = Stage.Origin;
         c.sensorId = sensorId;
         _record(id, msg.sender, Stage.Origin);
 
-        emit ContainerCreated(id, msg.sender, sensorId);
+        emit ContainerCreated(id, msg.sender, sensorId, c.code);
+    }
+
+    /// @notice The supplier records the number of the seal applied after loading. It can be
+    ///         corrected until the container is handed to the carrier, then it's fixed.
+    function recordSeal(uint256 containerId, bytes32 sealNumber) external whenSystemActive {
+        Unit storage c = units[containerId];
+        require(c.kind == Kind.Container, "no such container");
+        require(c.supplier == msg.sender, "not this container's supplier");
+        require(c.stage == Stage.Origin && c.pendingTo == address(0), "container already dispatched");
+        require(sealNumber != bytes32(0), "seal number required");
+
+        c.sealNumber = sealNumber;
+        emit SealRecorded(containerId, sealNumber);
+    }
+
+    /// @notice A container number in ISO 6346 form: owner code "CCS", category "U", a six-digit
+    ///         serial and the standard check digit. The serial is the id passed through a fixed
+    ///         permutation of 0..999999 (7919 is coprime with 10^6), so numbers are unique but not
+    ///         sequential.
+    function containerCode(uint256 id) public pure returns (bytes11) {
+        require(id < 1_000_000, "container numbers exhausted");
+        uint256 serial = (id * 7919 + 104729) % 1_000_000;
+        bytes memory out = new bytes(11);
+        (out[0], out[1], out[2], out[3]) = (bytes1("C"), bytes1("C"), bytes1("S"), bytes1("U"));
+        for (uint256 i = 0; i < 6; i++) {
+            out[4 + i] = bytes1(uint8(48 + ((serial / 10 ** (5 - i)) % 10)));
+        }
+        out[10] = bytes1(uint8(48 + _checkDigit(bytes11(out))));
+        return bytes11(out);
+    }
+
+    /// @notice A freight container number: three-letter owner code, category "U", six digits and
+    ///         the correct ISO 6346 check digit.
+    function isValidContainerCode(bytes11 code) public pure returns (bool) {
+        for (uint256 i = 0; i < 11; i++) {
+            bytes1 ch = code[i];
+            bool ok = i < 3 ? (ch >= "A" && ch <= "Z") : i == 3 ? ch == "U" : (ch >= "0" && ch <= "9");
+            if (!ok) return false;
+        }
+        return uint8(code[10]) - 48 == _checkDigit(code);
+    }
+
+    /// @dev ISO 6346: letters are worth 10-38 skipping multiples of 11, digits their value; the
+    ///      first ten characters are weighted 2^0..2^9, and the check digit is (sum mod 11) mod 10.
+    function _checkDigit(bytes11 code) internal pure returns (uint8) {
+        uint256 sum = 0;
+        for (uint256 i = 0; i < 10; i++) {
+            uint256 ch = uint8(code[i]);
+            uint256 value;
+            if (ch >= 65) {
+                value = ch - 65 + 10;
+                if (value >= 11) value++;
+                if (value >= 22) value++;
+                if (value >= 33) value++;
+            } else {
+                value = ch - 48;
+            }
+            sum += value << i;
+        }
+        return uint8((sum % 11) % 10);
     }
 
     function addBatch(
@@ -145,7 +221,7 @@ contract ShipmentCustody {
     ) external whenSystemActive returns (uint256 id) {
         Unit storage c = units[containerId];
         require(c.kind == Kind.Container, "no such container");
-        require(c.importer == msg.sender, "not this container's importer");
+        require(c.supplier == msg.sender, "not this container's supplier");
         require(c.stage == Stage.Origin, "container already dispatched");
         require(registry.hasRole(registry.BUYER(), buyer), "buyer not registered");
         require(registry.hasRole(registry.INSPECTOR(), inspector), "inspector not registered");
@@ -155,7 +231,8 @@ contract ShipmentCustody {
         Unit storage b = units[id];
         b.kind = Kind.Batch;
         b.containerId = containerId;
-        b.importer = msg.sender;
+        b.code = c.code;
+        b.supplier = msg.sender;
         b.stage = Stage.Origin;
         b.sensorId = sensorId;
         b.buyer = buyer;
@@ -179,7 +256,10 @@ contract ShipmentCustody {
         if (u.kind == Kind.Container) {
             require(u.splitAt == 0, "container already split");
             require(u.stage != Stage.ColdStore, "split the container first");
-            if (u.stage == Stage.Origin) require(batchesOf[id].length > 0, "add a batch first");
+            if (u.stage == Stage.Origin) {
+                require(batchesOf[id].length > 0, "add a batch first");
+                require(u.sealNumber != bytes32(0), "record the seal number first");
+            }
         }
         require(_isValidNextCustodian(u, to), "recipient not valid for next leg");
 
@@ -222,6 +302,7 @@ contract ShipmentCustody {
         require(c.splitAt == 0, "already split");
 
         c.splitAt = uint64(block.timestamp);
+        delete activeContainerByCode[c.code]; // the box has been unloaded; its number can be used again
         uint256[] memory ids = batchesOf[containerId];
         for (uint256 i = 0; i < ids.length; i++) {
             Unit storage b = units[ids[i]];

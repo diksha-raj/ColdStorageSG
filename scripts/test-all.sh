@@ -56,10 +56,12 @@ npx tsx services/common/scripts/seed-demo.ts > "$LOGS/seed.log" 2>&1 || { echo "
 FAILED=0
 run() {
   local name=$1; shift
-  if "$@" > "$LOGS/$name.log" 2>&1; then
-    echo "✔ $name  $(grep -ahoE '[0-9]+ passing|ℹ pass [0-9]+' "$LOGS/$name.log" | tail -1)"
+  # "test-" prefix: the service logs (identity.log, …) live in the same folder.
+  local log="$LOGS/test-$name.log"
+  if "$@" > "$log" 2>&1; then
+    echo "✔ $name  $(grep -ahoE '[0-9]+ passing|ℹ pass [0-9]+' "$log" | tail -1)"
   else
-    echo "✖ $name  (see $LOGS/$name.log)"; FAILED=1
+    echo "✖ $name  (see $log)"; FAILED=1
   fi
 }
 

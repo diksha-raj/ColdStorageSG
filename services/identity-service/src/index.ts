@@ -166,12 +166,21 @@ app.post("/access-requests/:id/reject", requireAuth, requireRole("ADMIN"), async
 
 // ---- Participants ------------------------------------------------------------
 
-// Any signed-in user can list participants (e.g. the importer picks a buyer and inspector).
+// Any signed-in user can list participants (e.g. the supplier picks a buyer and inspector).
 app.get("/participants", requireAuth, async (req, res) => {
   const role = participantRole.optional().parse(req.query.role);
   const { rows } = role
     ? await db.query("SELECT * FROM identity.participants WHERE role = $1 AND active ORDER BY org_name", [role])
     : await db.query("SELECT * FROM identity.participants ORDER BY role, org_name");
+  res.json(rows);
+});
+
+/**
+ * Public directory for the certificate verification page: who a wallet belongs to.
+ * Only the organisation name and role, never contact details. No sign-in needed.
+ */
+app.get("/directory", async (_req, res) => {
+  const { rows } = await db.query("SELECT wallet, org_name, role, active FROM identity.participants ORDER BY org_name");
   res.json(rows);
 });
 

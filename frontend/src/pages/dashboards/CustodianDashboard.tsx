@@ -1,4 +1,4 @@
-// Air carrier, Changi handler, importer cold store and delivery truck share one dashboard:
+// Cargo, destination freight handler, cold store and reefer truck share one dashboard:
 // accept what's coming to you, hand on what you hold (and split, at the cold store), then upload
 // the sensor log for each leg you held.
 import { useAuth } from "../../auth";
@@ -12,9 +12,9 @@ import { useApi } from "../../lib/hooks";
 import type { Unit } from "../../lib/types";
 
 const INTRO: Partial<Record<Role, string>> = {
-  CARRIER: "Inspect containers on pickup, log temperatures and issues in flight, then check and hand over at Changi.",
+  CARRIER: "Inspect containers on pickup, log temperatures and issues in transit, then check and hand over at the destination port or airport.",
   HANDLER: "Inspect containers on arrival, log what happens on the ground, then check and hand over to the cold store.",
-  COLD_STORE: "Inspect containers on arrival, split them into batches, and check each batch out to a delivery truck.",
+  COLD_STORE: "Inspect containers on arrival, split them into batches, and check each batch out to a reefer truck.",
   TRUCK: "Inspect batches on pickup, log temperatures on the road, and check each one out to its buyer.",
 };
 

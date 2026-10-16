@@ -25,7 +25,7 @@ describe("CertificateRegistry", function () {
    * No sensor evidence is reported yet.
    */
   async function deliver(checks: Partial<Record<number, { out?: Partial<Check>; in?: Partial<Check> }>> = {}, stopAfter = 4) {
-    const [admin, oracle, certifier, device, importer, carrier, handler, coldStore, truck, buyer, inspector, stranger, otherInspector] =
+    const [admin, oracle, certifier, device, supplier, carrier, handler, coldStore, truck, buyer, inspector, stranger, otherInspector] =
       await ethers.getSigners();
     const registry = await ethers.deployContract("ParticipantRegistry", [admin.address]);
     const custody = await ethers.deployContract("ShipmentCustody", [await registry.getAddress()]);
@@ -38,7 +38,7 @@ describe("CertificateRegistry", function () {
     for (const [s, r] of [
       [oracle, "ORACLE"],
       [certifier, "CERTIFIER"],
-      [importer, "IMPORTER"],
+      [supplier, "SUPPLIER"],
       [carrier, "CARRIER"],
       [handler, "HANDLER"],
       [coldStore, "COLD_STORE"],
@@ -51,15 +51,16 @@ describe("CertificateRegistry", function () {
     }
     await sensors.registerSensor(bytes32("CTR"), device.address);
     await sensors.registerSensor(bytes32("B"), device.address);
-    await custody.connect(importer).createContainer(bytes32("CTR"));
-    await custody.connect(importer).addBatch(1, buyer.address, inspector.address, 40, 15, bytes32("B"));
+    await custody.connect(supplier).createContainer(bytes32("CTR"), "0x" + "00".repeat(11));
+    await custody.connect(supplier).addBatch(1, buyer.address, inspector.address, 40, 15, bytes32("B"));
+    await custody.connect(supplier).recordSeal(1, bytes32("SGB4471203"));
 
     const handover = async (stage: number, unit: number, from: typeof admin, to: typeof admin) => {
       await custody.connect(from).initiateTransfer(unit, to.address, { ...OK, ...checks[stage]?.out });
       await custody.connect(to).acceptTransfer(unit, { ...OK, ...checks[stage]?.in });
     };
     const route = [
-      () => handover(0, 1, importer, carrier),
+      () => handover(0, 1, supplier, carrier),
       () => handover(1, 1, carrier, handler),
       async () => {
         await handover(2, 1, handler, coldStore);
@@ -88,7 +89,7 @@ describe("CertificateRegistry", function () {
       }
     };
 
-    return { registry, custody, sensors, certs, certifier, importer, carrier, handler, coldStore, buyer, inspector, stranger, otherInspector, report, certifyAll };
+    return { registry, custody, sensors, certs, certifier, supplier, carrier, handler, coldStore, buyer, inspector, stranger, otherInspector, report, certifyAll };
   }
 
   describe("stage flags", function () {
@@ -145,10 +146,10 @@ describe("CertificateRegistry", function () {
   describe("claims", function () {
     it("open as soon as a handover is flagged, while the batch is still in transit", async function () {
       // The carrier finds the goods warm at pickup: a problem at origin, before any sensor log exists.
-      const { certs, certifier, importer } = await deliver({ 0: { in: { tempTenthsC: 72 } } }, 0);
+      const { certs, certifier, supplier } = await deliver({ 0: { in: { tempTenthsC: 72 } } }, 0);
       await expect(certs.connect(certifier).openClaim(BATCH, 0))
         .to.emit(certs, "ClaimOpened")
-        .withArgs(1, BATCH, 0, importer.address, FLAG.RECEIPT_TEMP);
+        .withArgs(1, BATCH, 0, supplier.address, FLAG.RECEIPT_TEMP);
       expect(await certs.openClaimCount(BATCH)).to.equal(1n);
     });
 

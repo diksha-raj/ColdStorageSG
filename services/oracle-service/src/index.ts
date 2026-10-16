@@ -15,7 +15,7 @@ import {
   contract,
   z,
 } from "@coldchainsg/common";
-import { ZeroAddress, ZeroHash, decodeBytes32String, encodeBytes32String } from "ethers";
+import { ZeroAddress, ZeroHash, decodeBytes32String, encodeBytes32String, toUtf8String } from "ethers";
 import {
   STATUS,
   batchesFor,
@@ -27,7 +27,7 @@ import {
   startSensorLoop,
   submitUpload,
 } from "./evidence.ts";
-import { DEMO_FILES, type DemoFile, RECORDINGS, type Recording } from "./replay.ts";
+import { DEMO_FILES, type DemoFile, RECORDINGS, type Recording, parseAndRebase, sha256 } from "./replay.ts";
 import { schemaSql } from "./schema.ts";
 
 await migrate(schemaSql);
@@ -90,8 +90,13 @@ async function legStatus(shipmentId: number, leg: number) {
     evidence.push({ batchId, status: STATUS[Number((await sensorOracle().getSummary(batchId, leg)).status)] });
   }
   const committed = l.committedHash !== ZeroHash;
+  const staged = await db.query(
+    "SELECT file_name, created_at FROM oracle.staged_uploads WHERE shipment_id = $1 AND leg = $2",
+    [l.recordedOn, leg],
+  );
   return {
     shipmentId: l.recordedOn,
+    containerCode: toUtf8String((await custody().getUnit(l.recordedOn)).code),
     leg,
     custodian: l.custodian,
     start: l.start || null,
@@ -100,8 +105,10 @@ async function legStatus(shipmentId: number, leg: number) {
     recording: await recordingFor(l.recordedOn, leg),
     sensorCommitted: committed,
     evidence,
-    // Upload is possible once the leg has ended and the sensor has committed, until every batch is verified.
-    awaitingUpload: !!l.end && committed && evidence.some((e) => e.status !== "Verified"),
+    // A log is owed once the leg has ended and the sensor has committed, until every batch is verified.
+    awaitingUpload: !!l.end && committed && evidence.some((e) => e.status !== "Verified") && !staged.rows[0],
+    // A log uploaded at handover, waiting to be checked when the leg ends and the sensor reports.
+    stagedUpload: staged.rows[0] ? { fileName: staged.rows[0].file_name, uploadedAt: staged.rows[0].created_at } : null,
   };
 }
 
@@ -145,8 +152,12 @@ app.get("/demo-files", requireAuth, (_req, res) => {
 });
 
 /**
- * The custodian who held a leg uploads its logger file: either a demo file by name, or the raw
- * bytes of a CSV as base64 (bytes, not text, so the hash is exactly the file's).
+ * The custodian who holds (or held) a leg uploads its logger file: either a demo file by name, or
+ * the raw bytes of a CSV as base64 (bytes, not text, so the hash is exactly the file's).
+ *
+ * Normally this happens at handover, before the leg ends: the log is then staged and checked
+ * against the sensor's commit as soon as the receiver accepts and the sensor reports. After the
+ * leg has ended (e.g. to replace a log that didn't match) it's checked straight away.
  */
 app.post("/legs/:shipmentId/:leg/upload", requireAuth, async (req, res) => {
   const { wallet } = req as AuthedRequest;
@@ -162,16 +173,30 @@ app.post("/legs/:shipmentId/:leg/upload", requireAuth, async (req, res) => {
   if (!l.custodian || l.custodian !== wallet) {
     throw new HttpError(403, "Only the custodian who held this leg can upload its sensor log");
   }
-  if (!l.end) throw new HttpError(409, "This leg is still in progress. Upload the log after you've handed over.");
-  if (l.committedHash === ZeroHash) {
-    throw new HttpError(409, "The sensor hasn't reported this leg yet. Try again in a few seconds.");
-  }
-  const { awaitingUpload } = await legStatus(l.recordedOn, leg);
-  if (!awaitingUpload) throw new HttpError(409, "This leg's evidence is already verified");
-
   const file =
     "demoFile" in body ? rawFile(DEMO_FILES[body.demoFile].file) : Buffer.from(body.fileBase64, "base64");
   const fileName = "demoFile" in body ? DEMO_FILES[body.demoFile].file : body.fileName;
+  try {
+    parseAndRebase(file.toString("utf8"), 0); // reject a bad CSV now, not when it's checked later
+  } catch (err) {
+    throw new HttpError(400, (err as Error).message);
+  }
+
+  const status = await legStatus(l.recordedOn, leg);
+  if (status.evidence.length > 0 && status.evidence.every((e) => e.status === "Verified")) {
+    throw new HttpError(409, "This leg's evidence is already verified");
+  }
+
+  // Leg still open (or the sensor hasn't reported yet): hold the log and check it when the leg closes.
+  if (!l.end || l.committedHash === ZeroHash) {
+    await db.query(
+      `INSERT INTO oracle.staged_uploads (shipment_id, leg, uploaded_by, file_name, raw_file) VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (shipment_id, leg) DO UPDATE SET uploaded_by = $3, file_name = $4, raw_file = $5, created_at = now()`,
+      [l.recordedOn, leg, wallet, fileName, file],
+    );
+    res.status(202).json({ shipmentId: l.recordedOn, leg, staged: true, fileName, fileHash: sha256(file) });
+    return;
+  }
 
   let result;
   try {

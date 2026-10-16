@@ -1,5 +1,5 @@
 // Keeps the certificate lifecycle moving. Every few seconds it looks at each open batch and
-// does whatever is due next, for each of the five stages (0 origin ... 4 delivery truck):
+// does whatever is due next, for each of the five stages (0 origin ... 4 reefer truck):
 //   stage flagged (by a handover check or the sensor log) without a claim -> openClaim
 //   checkpoint done (and, for legs 1-4, a verified sensor log) but no LegPass -> issueLegPass
 //   all five LegPasses but no final certificate -> issueFinalCertificate

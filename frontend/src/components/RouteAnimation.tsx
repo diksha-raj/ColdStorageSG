@@ -2,15 +2,15 @@
 // sensor evidence, the container splits into batches at the cold store, and the run ends in a
 // clean certificate. Respects prefers-reduced-motion by showing the finished state.
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { BadgeCheck, Container, Factory, Lock, Package, Plane, PlaneLanding, Refrigerator, Store, Truck } from "lucide-react";
+import { BadgeCheck, Boxes, Container, Factory, Forklift, Lock, Package, Refrigerator, Store, Truck } from "lucide-react";
 import { useEffect, useState } from "react";
 
 const STOPS = [
   { label: "Supplier", Icon: Factory },
-  { label: "Air carrier", Icon: Plane },
-  { label: "Changi handler", Icon: PlaneLanding },
-  { label: "Cold store", Icon: Refrigerator },
-  { label: "Delivery truck", Icon: Truck },
+  { label: "Cargo", Icon: Boxes },
+  { label: "Destination Freight Handler", Icon: Forklift },
+  { label: "Cold Store", Icon: Refrigerator },
+  { label: "Reefer Truck", Icon: Truck },
   { label: "Buyer", Icon: Store },
 ];
 const READINGS = ["2.9", "3.1", "2.7", "2.4", "3.0", "2.8"];
@@ -41,7 +41,7 @@ export function RouteAnimation() {
     <div
       className="relative rounded-3xl border border-line bg-white px-4 pb-8 pt-20 shadow-sm sm:px-12"
       role="img"
-      aria-label="A container moves from supplier to air carrier, Changi handler, cold store, delivery truck and buyer. Each handover seals that leg's temperature evidence, and the journey ends with a clean quality certificate."
+      aria-label="A container moves from supplier to cargo carrier, destination freight handler, cold store, reefer truck and buyer. Each handover seals that leg's temperature evidence, and the journey ends with a clean quality certificate."
     >
       <div className="relative mx-3 sm:mx-8">
         {/* The travelling shipment, with its live temperature reading */}

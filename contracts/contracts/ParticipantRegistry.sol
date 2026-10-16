@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.34;
 
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
@@ -10,7 +10,7 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 ///         Organisation names and contact details live off-chain in the Identity Service.
 contract ParticipantRegistry is AccessControl, Pausable {
     // Human participants
-    bytes32 public constant IMPORTER = keccak256("IMPORTER");
+    bytes32 public constant SUPPLIER = keccak256("SUPPLIER");
     bytes32 public constant CARRIER = keccak256("CARRIER");
     bytes32 public constant HANDLER = keccak256("HANDLER");
     bytes32 public constant COLD_STORE = keccak256("COLD_STORE");
@@ -62,7 +62,7 @@ contract ParticipantRegistry is AccessControl, Pausable {
     }
 
     function isParticipantRole(bytes32 role) public pure returns (bool) {
-        return role == IMPORTER || role == CARRIER || role == HANDLER || role == COLD_STORE || role == TRUCK
+        return role == SUPPLIER || role == CARRIER || role == HANDLER || role == COLD_STORE || role == TRUCK
             || role == BUYER || role == INSPECTOR || role == ORACLE || role == CERTIFIER;
     }
 

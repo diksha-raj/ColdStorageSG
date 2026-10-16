@@ -4,16 +4,19 @@
 //   receiver  → "Inspect & accept": an incoming check of what they actually received
 // Both are signed on-chain inside the handover transaction. There's no rejection: problems are
 // recorded, flag the stage, and are ruled on by QA. At the cold store there's also "Split".
+// A handover that ends a sensor leg asks for that leg's sensor log first: upload the log, then hand over.
+import { encodeBytes32String } from "ethers";
 import { ArrowRight, ClipboardCheck, Split } from "lucide-react";
 import { type FormEvent, type ReactNode, useState } from "react";
 import { useAuth } from "../auth";
 import { api } from "../lib/api";
 import { sendTx } from "../lib/chain";
-import { HANDOVER_NAMES, HANDOVER_TARGET, ISSUE_CATEGORIES, NEXT_ROLE, REASON_LABELS, ROLE_LABELS, sameAddress } from "../lib/format";
+import { HANDOVER_NAMES, ISSUE_CATEGORIES, LEG_NAMES, NEXT_ROLE, REASON_LABELS, ROLE_LABELS, sameAddress } from "../lib/format";
 import { useAction, useApi } from "../lib/hooks";
 import { useParticipants } from "../lib/participants";
 import { checkpointReasons, toCheckInput } from "../lib/quality";
-import type { Check, LegLog, ShipmentDetail, Unit } from "../lib/types";
+import type { Check, LegLog, LegStatus, ShipmentDetail, Unit } from "../lib/types";
+import { type LogChoice, LogPicker, emptyLogChoice, logChoiceReady, uploadLog } from "./LogPicker";
 import { ActionFeedback, Badge, Button, Field, Notice, Party, inputClass } from "./ui";
 
 const STAGE_INDEX = ["Origin", "Carrier", "Handler", "ColdStore", "Truck", "Delivered"];
@@ -37,24 +40,9 @@ export function HandoverActions({ unit, onDone }: { unit: Unit; onDone: () => vo
 
   if (!sameAddress(unit.custodian, me)) return null;
 
-  // 2. Container at the cold store: split it before anything moves on.
+  // 2. Container at the cold store: the split ends leg 3, so upload its sensor log, then split.
   if (unit.kind === "container" && unit.stage === "ColdStore" && !unit.splitAt) {
-    return (
-      <div className="space-y-2">
-        <Button
-          busy={split.busy}
-          onClick={() =>
-            split.run(async () => {
-              await sendTx("ShipmentCustody", "splitContainer", [unit.id]);
-              onDone();
-            })
-          }
-        >
-          <Split className="size-4" aria-hidden /> Split into batches
-        </Button>
-        <ActionFeedback error={split.error} />
-      </div>
-    );
+    return <SplitWithLog unit={unit} action={split} onDone={onDone} />;
   }
 
   // 3. I hold it: run my outgoing check and hand over to the next custodian.
@@ -71,7 +59,7 @@ export function HandoverActions({ unit, onDone }: { unit: Unit; onDone: () => vo
         <OutgoingCheckForm unit={unit} nextRole={nextRole} onCancel={() => setOpen(false)} onDone={() => (setOpen(false), onDone())} />
       ) : (
         <Button variant={unit.pendingTo ? "secondary" : "primary"} onClick={() => setOpen(true)}>
-          {nextRole === "BUYER" ? "Check & deliver to buyer" : `Check & hand over to the ${HANDOVER_TARGET[nextRole]}`}
+          {nextRole === "BUYER" ? "Check & deliver to buyer" : `Check & hand over to ${ROLE_LABELS[nextRole]}`}
           <ArrowRight className="size-4" aria-hidden />
         </Button>
       )}
@@ -90,7 +78,9 @@ function CheckFields({
   minutesLabel,
   minutesHint,
   issuesControl,
+  sealNumber,
 }: {
+  sealNumber?: string | null;
   values: CheckValues;
   set: (patch: Partial<CheckValues>) => void;
   tempLabel: string;
@@ -109,7 +99,7 @@ function CheckFields({
       <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm sm:col-span-2">
         <label className="inline-flex items-center gap-2">
           <input type="checkbox" className="size-4 accent-brand" checked={values.sealIntact} onChange={(e) => set({ sealIntact: e.target.checked })} />
-          Seal intact
+          Seal intact{sealNumber && <span className="text-muted">(no. <span className="font-mono">{sealNumber}</span>)</span>}
         </label>
         <label className="inline-flex items-center gap-2">
           <input type="checkbox" className="size-4 accent-brand" checked={values.damaged} onChange={(e) => set({ damaged: e.target.checked })} />
@@ -142,6 +132,9 @@ function limitsOf(detail: ShipmentDetail) {
 
 // ---- Sender: outgoing check -------------------------------------------------------------------
 
+/** Seal numbers: letters, digits and dashes, short enough to store as a bytes32 on-chain. */
+const SEAL_PATTERN = /^[A-Z0-9-]{4,31}$/;
+
 function OutgoingCheckForm({
   unit,
   nextRole,
@@ -164,12 +157,30 @@ function OutgoingCheckForm({
 
   // Issues you reported during the leg can't be quietly left out of your signed check.
   const reportedIssues = (log?.digest.issues ?? 0) > 0;
+
+  // This handover ends a sensor leg (carrier: 1, handler: 2, truck: 4): upload its log first.
+  const sensorLeg = sensorLegClosedBy(unit);
+  const { data: myLegs } = useApi<LegStatus[]>("oracle", sensorLeg ? "/legs" : null);
+  const staged = myLegs?.find((l) => l.shipmentId === unit.id && l.leg === sensorLeg)?.stagedUpload ?? null;
+  const [logChoice, setLogChoice] = useState<LogChoice>(emptyLogChoice());
+  const logReady = !sensorLeg || logChoiceReady(logChoice) || (!!staged && logChoice.source === "");
   const minutes = values.unrefrigeratedMinutes === "" ? String(log?.digest.unrefrigeratedMinutes ?? 0) : values.unrefrigeratedMinutes;
   const effective = { ...values, unrefrigeratedMinutes: minutes, issues: values.issues || reportedIssues };
+
+  // The supplier's dispatch: record the seal applied after loading. It's fixed once the carrier has it.
+  const needsSeal = unit.kind === "container" && unit.stage === "Origin";
+  const [seal, setSeal] = useState(unit.sealNumber ?? "");
+  const sealValid = !needsSeal || SEAL_PATTERN.test(seal.trim());
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
     submit.run(async () => {
+      // 1. Upload the leg's sensor log. It's checked against the sensor once the receiver accepts.
+      if (sensorLeg && logChoiceReady(logChoice)) await uploadLog(unit.id, sensorLeg, logChoice);
+      if (needsSeal && seal.trim() !== unit.sealNumber) {
+        await sendTx("ShipmentCustody", "recordSeal", [unit.id, encodeBytes32String(seal.trim())]);
+      }
+      // 2. Then sign the outgoing check and hand over.
       const { notesHash } = await api("custody", `/shipments/${unit.id}/seal`, { body: { direction: "out", note: values.note } });
       await sendTx("ShipmentCustody", "initiateTransfer", [unit.id, recipient, toCheckInput(asNumbers(effective), notesHash)]);
       onDone();
@@ -202,6 +213,27 @@ function OutgoingCheckForm({
           )}
         </p>
       )}
+      {sensorLeg && (
+        <div className="rounded-lg border border-line p-3">
+          <div className="mb-2 text-sm font-medium">
+            Leg {sensorLeg} sensor log ({LEG_NAMES[sensorLeg]})
+            <span className="font-normal text-muted"> · checked against the sensor's own record once the receiver accepts</span>
+          </div>
+          {staged && (
+            <p className="mb-2 text-sm text-pass">
+              Already uploaded: <span className="font-mono">{staged.fileName}</span>. Choose another file only to replace it.
+            </p>
+          )}
+          <LogPicker value={logChoice} onChange={setLogChoice} label={`Leg ${sensorLeg} sensor log`} />
+        </div>
+      )}
+      {needsSeal && (
+        <div className="w-full sm:w-72">
+          <Field label="Seal number" hint="From the seal applied after loading. It's printed on the certificate and can't be changed after dispatch.">
+            <input className={`${inputClass} font-mono uppercase`} value={seal} onChange={(e) => setSeal(e.target.value.toUpperCase())} placeholder="e.g. SGB4471203" required />
+          </Field>
+        </div>
+      )}
       <CheckFields
         values={effective}
         set={set}
@@ -219,7 +251,7 @@ function OutgoingCheckForm({
         <div className="w-full sm:w-72">
           <Field label={`Hand over to (${ROLE_LABELS[nextRole]})`}>
             <select className={inputClass} value={recipient} onChange={(e) => setTo(e.target.value)}>
-              {options.length === 0 && <option value="">No {HANDOVER_TARGET[nextRole]} registered</option>}
+              {options.length === 0 && <option value="">No {ROLE_LABELS[nextRole]} registered</option>}
               {options.map((p) => (
                 <option key={p.wallet} value={p.wallet}>
                   {p.org_name}
@@ -228,8 +260,8 @@ function OutgoingCheckForm({
             </select>
           </Field>
         </div>
-        <Button type="submit" busy={submit.busy} disabled={!recipient || values.tempC === ""}>
-          Sign check & hand over <ArrowRight className="size-4" aria-hidden />
+        <Button type="submit" busy={submit.busy} disabled={!recipient || values.tempC === "" || !logReady || !sealValid}>
+          {sensorLeg ? "Upload log, sign check & hand over" : "Sign check & hand over"} <ArrowRight className="size-4" aria-hidden />
         </Button>
         <Button type="button" variant="ghost" onClick={onCancel}>
           Cancel
@@ -297,6 +329,7 @@ function IncomingCheckForm({ unit, onCancel, onDone }: { unit: Unit; onCancel: (
         values={values}
         set={set}
         tempLabel="Probe temperature on receipt (°C)"
+        sealNumber={detail.kind === "container" ? detail.sealNumber : null}
         minutesLabel="Minutes it waited unrefrigerated at the handover"
         issuesControl={
           <fieldset className="flex flex-wrap gap-2">
@@ -377,6 +410,54 @@ export function CheckSummary({ check }: { check: Check }) {
       <span className={check.sealIntact ? "" : "font-medium text-fail"}>{check.sealIntact ? "Seal intact" : "Seal broken"}</span>
       {check.damaged && <span className="font-medium text-fail">Packaging damaged</span>}
       {check.issues && <span className="font-medium text-warn">Issues reported</span>}
+    </div>
+  );
+}
+
+/** The sensor leg a handover from this unit ends: carrier → handler ends leg 1, handler → cold store
+ *  leg 2, truck → buyer leg 4. Leg 3 (cold store) ends at the split, handled by SplitWithLog. */
+function sensorLegClosedBy(unit: Unit): number | null {
+  if (unit.kind === "container" && unit.stage === "Carrier") return 1;
+  if (unit.kind === "container" && unit.stage === "Handler") return 2;
+  if (unit.kind === "batch" && unit.stage === "Truck") return 4;
+  return null;
+}
+
+/** The cold store's leg ends at the split: upload its sensor log, then split. */
+function SplitWithLog({ unit, action, onDone }: { unit: Unit; action: ReturnType<typeof useAction>; onDone: () => void }) {
+  const { data: myLegs } = useApi<LegStatus[]>("oracle", "/legs");
+  const staged = myLegs?.find((l) => l.shipmentId === unit.id && l.leg === 3)?.stagedUpload ?? null;
+  const [choice, setChoice] = useState<LogChoice>(emptyLogChoice());
+  const ready = logChoiceReady(choice) || (!!staged && choice.source === "");
+
+  return (
+    <div className="space-y-3">
+      <div className="rounded-lg border border-line p-3">
+        <div className="mb-2 text-sm font-medium">
+          Leg 3 sensor log (Cold Store)
+          <span className="font-normal text-muted"> · splitting ends your leg; the log is checked against the sensor's own record</span>
+        </div>
+        {staged && (
+          <p className="mb-2 text-sm text-pass">
+            Already uploaded: <span className="font-mono">{staged.fileName}</span>. Choose another file only to replace it.
+          </p>
+        )}
+        <LogPicker value={choice} onChange={setChoice} label="Leg 3 sensor log" />
+      </div>
+      <Button
+        busy={action.busy}
+        disabled={!ready}
+        onClick={() =>
+          action.run(async () => {
+            if (logChoiceReady(choice)) await uploadLog(unit.id, 3, choice);
+            await sendTx("ShipmentCustody", "splitContainer", [unit.id]);
+            onDone();
+          })
+        }
+      >
+        <Split className="size-4" aria-hidden /> Upload log & split into batches
+      </Button>
+      <ActionFeedback error={action.error} />
     </div>
   );
 }

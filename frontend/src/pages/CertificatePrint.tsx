@@ -1,10 +1,12 @@
 // A printable, A4 quality certificate for one batch, built live from the on-chain record.
 // "Print / Save as PDF" uses the browser's print dialog. Only available once the certificate is issued.
 import { ArrowLeft, Printer, Snowflake } from "lucide-react";
+import QRCode from "qrcode";
 import { type ReactNode, useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 import { Loading, Notice } from "../components/ui";
 import { getConfig } from "../lib/chain";
+import { issuingTx } from "../lib/onchain";
 import { HANDOVER_NAMES, LEG_NAMES, REASON_LABELS, shortAddress } from "../lib/format";
 import { useApi } from "../lib/hooks";
 import { useParticipants } from "../lib/participants";
@@ -34,10 +36,19 @@ export function CertificatePrint() {
   const { data: evidence } = useApi<Evidence>("oracle", `/evidence/${batchId}`);
   const { get } = useParticipants();
   const [chain, setChain] = useState<{ chainId: number; registry: string } | null>(null);
+  const [issuance, setIssuance] = useState<{ hash: string; blockNumber: number } | null>(null);
+  const [qr, setQr] = useState<string | null>(null);
 
   useEffect(() => {
     getConfig().then((c) => setChain({ chainId: c.chainId, registry: c.contracts.CertificateRegistry.address }));
-  }, []);
+    issuingTx(Number(batchId)).then(setIssuance);
+  }, [batchId]);
+
+  // The QR opens the public verification page, pinned to the chain and registry this was printed from.
+  const verifyUrl = chain ? `${window.location.origin}/verify/${batchId}?chain=${chain.chainId}&registry=${chain.registry}` : null;
+  useEffect(() => {
+    if (verifyUrl) QRCode.toDataURL(verifyUrl, { margin: 1, width: 240 }).then(setQr);
+  }, [verifyUrl]);
 
   if (error) return <Notice tone="error">{error}</Notice>;
   if (!s || !cert || !evidence || !chain) return <Loading />;
@@ -60,6 +71,13 @@ export function CertificatePrint() {
   const number = `CCSG-${chain.chainId}-${String(cert.batchId).padStart(5, "0")}`;
   const status = STATUS_TEXT[cert.certificate.status];
   const decision = cert.decision;
+
+  // The origin seal stays on the container until the cold store opens it to split (stages 0-2).
+  const sealChecks = s.checkpoints.filter((c) => c.stage <= 2 && c.incoming);
+  const sealBroken = sealChecks.filter((c) => !c.incoming!.sealIntact).map((c) => c.stage);
+  const sealSummary = sealBroken.length
+    ? `reported broken on receipt at stage ${sealBroken.join(", ")}`
+    : `reported intact at ${sealChecks.length} container handover(s), then opened at the cold store for the split`;
 
   const rows = [0, 1, 2, 3, 4].map((stage) => {
     const lp = cert.legPasses.find((p) => p.leg === stage);
@@ -131,15 +149,19 @@ export function CertificatePrint() {
               {s.details && ` · ${s.details.quantity} ${s.details.unit}`}
             </Item>
             <Item label="Batch / container">
-              Batch #{s.id} · Container #{s.containerId}
+              Batch #{s.id} · Container <span className="font-mono">{s.containerCode}</span>
+            </Item>
+            <Item label="Origin seal">
+              {s.sealNumber ? <span className="font-mono">{s.sealNumber}</span> : "—"}
+              <span className="text-muted"> · applied by {org(s.supplier)} before dispatch; {sealSummary}</span>
             </Item>
             <Item label="Temperature rule">
               ≤ {s.thresholdC} °C, {s.graceMinutes} min grace period
             </Item>
             <Item label="Sensors">{evidence.legs.map((l) => l.sensorId).filter((v, i, a) => a.indexOf(v) === i).join(", ")}</Item>
-            <Item label="Importer">{org(s.importer)}</Item>
+            <Item label="Supplier">{org(s.supplier)}</Item>
             <Item label="Buyer">{org(s.buyer)}</Item>
-            <Item label="QA inspector">{org(s.inspector)}</Item>
+            <Item label="Quality Inspector">{org(s.inspector)}</Item>
           </dl>
         </Section>
 
@@ -234,16 +256,22 @@ export function CertificatePrint() {
 
         {/* Verification */}
         <Section title="Verification">
-          <p className="text-muted">
-            Every figure above is read from the blockchain record. To verify, call{" "}
-            <span className="font-mono">getCertificate({cert.batchId})</span> on the CertificateRegistry contract below, and compare each sensor
-            log's SHA-256 with <span className="font-mono">SensorOracle.verifyFileHash</span>.
-          </p>
+          <div className="flex items-start gap-4">
+            {qr && <img src={qr} alt="QR code linking to the public verification page" data-testid="verify-qr" className="size-28 shrink-0" />}
+            <p className="text-muted">
+              Scan the code, or open the link below, to see this certificate and every transaction behind it read live from the blockchain. No
+              sign-in is needed. Any difference from this paper copy means it was altered. You can also call{" "}
+              <span className="font-mono">getCertificate({cert.batchId})</span> on the CertificateRegistry contract yourself, and compare each sensor
+              log's SHA-256 with <span className="font-mono">SensorOracle.verifyFileHash</span>.
+              <span className="mt-1 block break-all font-mono text-[11px] text-ink">{verifyUrl}</span>
+            </p>
+          </div>
           <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 font-mono text-[11px]">
             <dt className="text-muted">Chain ID</dt>
             <dd>{chain.chainId}</dd>
             <dt className="text-muted">CertificateRegistry</dt>
             <dd className="break-all">{chain.registry}</dd>
+            <FragmentRow label="Issued in tx" value={issuance ? `${issuance.hash} (block ${issuance.blockNumber})` : "—"} />
             {evidence.legs.map((l) => (
               <FragmentRow key={l.leg} label={`Leg ${l.leg} sensor log`} value={l.summary?.fileHash ?? "—"} />
             ))}

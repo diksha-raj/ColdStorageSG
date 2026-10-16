@@ -34,6 +34,18 @@ CREATE TABLE IF NOT EXISTS oracle.leg_uploads (
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- A log the custodian uploaded at handover, before their leg ended. It's checked against the
+-- sensor's commit as soon as the leg ends (the receiver accepts) and the sensor reports.
+CREATE TABLE IF NOT EXISTS oracle.staged_uploads (
+  shipment_id  INTEGER NOT NULL,
+  leg          INTEGER NOT NULL,
+  uploaded_by  TEXT NOT NULL,
+  file_name    TEXT NOT NULL,
+  raw_file     BYTEA NOT NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (shipment_id, leg)
+);
+
 CREATE TABLE IF NOT EXISTS oracle.upload_results (
   id              SERIAL PRIMARY KEY,
   upload_id       INTEGER NOT NULL REFERENCES oracle.leg_uploads(id),

@@ -5,7 +5,7 @@ import { type FormEvent, useState } from "react";
 import { Link } from "react-router";
 import { useAuth } from "../auth";
 import { sendTx } from "../lib/chain";
-import { LEG_NAMES, REASON_LABELS, formatTime, sameAddress } from "../lib/format";
+import { HANDOVER_NAMES, LEG_NAMES, REASON_LABELS, formatTime, sameAddress } from "../lib/format";
 import { useAction, useApi } from "../lib/hooks";
 import type { BatchCertificate } from "../lib/types";
 import { ActionFeedback, Badge, Button, Card, Field, Loading, Party, StatusBadge, inputClass } from "./ui";
@@ -32,23 +32,45 @@ export function CertificatePanel({ batchId, buyer, inspector }: { batchId: numbe
   const canDecide = isInspector && !!data.certificate && openClaims === 0 && !data.decision;
   const canAcknowledge = isBuyer && !!data.decision && !data.acknowledgement;
 
+  // What's still holding the certificate up: a handover not done yet, or (legs 1-4) a sensor log
+  // its custodian hasn't uploaded, or one that didn't match the sensor.
+  const missing = data.certificate
+    ? []
+    : data.stages.flatMap((st) =>
+        !st.checkpointDone
+          ? [`the ${HANDOVER_NAMES[st.stage]} handover`]
+          : st.stage > 0 && !st.sensorDone
+            ? [`the leg ${st.stage} sensor log (${LEG_NAMES[st.stage]})`]
+            : [],
+      );
+
   return (
     <Card
       title="Quality certificate"
       subtitle={
         data.certificate
           ? `Issued ${formatTime(data.certificate.issuedAt)}`
-          : "Issued automatically once all five stages have their handover check (and, for legs 1-4, a verified sensor log)"
+          : `Not issued yet. Waiting for ${missing.join(", ")}.${
+              missing.some((m) => m.includes("sensor log")) ? " Custodians upload logs from the Sensor logs card on their dashboard." : ""
+            }`
       }
       action={
         <div className="flex items-center gap-2">
-          {data.certificate && (
+          {data.certificate ? (
             <Link
               to={`/certificates/${batchId}/print`}
               className="inline-flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-sm font-medium hover:bg-canvas"
             >
               <Printer className="size-4" aria-hidden /> Printable certificate
             </Link>
+          ) : (
+            <span
+              aria-disabled="true"
+              title="Available once the certificate is issued"
+              className="inline-flex cursor-not-allowed items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-sm font-medium text-muted opacity-60"
+            >
+              <Printer className="size-4" aria-hidden /> Printable certificate
+            </span>
           )}
           <StatusBadge status={certificateState(data)} />
         </div>

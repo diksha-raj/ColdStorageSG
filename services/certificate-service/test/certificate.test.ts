@@ -7,7 +7,7 @@
 //   cheese (limit 8 °C)  the same temperatures never exceed 8 °C      → clean; QA RELEASES it
 import assert from "node:assert/strict";
 import { before, test } from "node:test";
-import { OK_CHECK, adminToken, api, deployed, persona, provider } from "@coldchainsg/common/testing";
+import { AUTO_NUMBER, OK_CHECK, SEAL, adminToken, api, deployed, persona, provider } from "@coldchainsg/common/testing";
 import { encodeBytes32String } from "ethers";
 
 const certApi = api(`http://localhost:${process.env.CERTIFICATE_PORT ?? 4004}`);
@@ -28,15 +28,19 @@ const setRecording = async (shipmentId: number, leg: number, recording: string) 
   const res = await oracleApi(`/legs/${shipmentId}/${leg}/recording`, { method: "PUT", token: admin, body: { recording } });
   assert.equal(res.status, 200, JSON.stringify(res.body));
 };
-/** The custodian who held the leg uploads a logger file, once the sensor has committed. */
+/**
+ * The custodian who held the leg uploads a logger file after the handover, once the sensor has
+ * committed, so it's checked immediately. (Uploading at handover, before the sensor reports, is
+ * covered by the oracle and browser tests.)
+ */
 const upload = async (who: string, shipmentId: number, leg: number, demoFile: string) => {
-  for (let i = 0; i < 40; i++) {
-    const res = await oracleApi(`/legs/${shipmentId}/${leg}/upload`, { token: p[who].token, body: { demoFile } });
-    if (res.status === 201) return res.body;
-    if (!/sensor hasn't reported/.test(res.body.error)) assert.fail(JSON.stringify(res.body));
+  const oracle = deployed("SensorOracle", provider);
+  for (let i = 0; i < 40 && (await oracle.committedHash(shipmentId, leg)) === "0x" + "0".repeat(64); i++) {
     await new Promise((r) => setTimeout(r, 250));
   }
-  assert.fail("sensor never committed");
+  const res = await oracleApi(`/legs/${shipmentId}/${leg}/upload`, { token: p[who].token, body: { demoFile } });
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  return res.body;
 };
 const Disposition = { Released: 1, Rejected: 2 };
 const Outcome = { Upheld: 0, Overturned: 1, CompensationAgreed: 2 };
@@ -52,7 +56,7 @@ const certificate = async (batchId: number, who = "inspector") =>
 before(async () => {
   p = {};
   for (const [name, role] of [
-    ["importer", "IMPORTER"],
+    ["supplier", "SUPPLIER"],
     ["carrier", "CARRIER"],
     ["handler", "HANDLER"],
     ["coldStore", "COLD_STORE"],
@@ -75,12 +79,13 @@ test("dispatch and stage 1: the handler finds the container warm on receipt", as
   containerId = Number(await deployed("ShipmentCustody", provider).nextId());
   salmon = containerId + 1;
   cheese = containerId + 2;
-  await send("importer", "createContainer", encodeBytes32String(`CTR-${run}`));
-  await send("importer", "addBatch", containerId, p.salmonBuyer.address, p.inspector.address, 40, 15, encodeBytes32String(`SAL-${run}`));
-  await send("importer", "addBatch", containerId, p.cheeseBuyer.address, p.inspector.address, 80, 15, encodeBytes32String(`CHE-${run}`));
+  await send("supplier", "createContainer", encodeBytes32String(`CTR-${run}`), AUTO_NUMBER);
+  await send("supplier", "addBatch", containerId, p.salmonBuyer.address, p.inspector.address, 40, 15, encodeBytes32String(`SAL-${run}`));
+  await send("supplier", "addBatch", containerId, p.cheeseBuyer.address, p.inspector.address, 80, 15, encodeBytes32String(`CHE-${run}`));
   await setRecording(containerId, 2, "breach"); // the sensor will record a cooling failure on leg 2
 
-  await handover(containerId, "importer", "carrier"); // stage 0: clean dispatch
+  await send("supplier", "recordSeal", containerId, SEAL);
+  await handover(containerId, "supplier", "carrier"); // stage 0: clean dispatch
   await handover(containerId, "carrier", "handler", { tempTenthsC: 34 }, { tempTenthsC: 71, issues: true }); // stage 1
   await sync();
 });

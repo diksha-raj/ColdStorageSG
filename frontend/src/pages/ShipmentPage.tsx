@@ -32,7 +32,7 @@ export function ShipmentPage() {
       </Link>
       <PageHeader
         title={unitTitle(s)}
-        subtitle={s.kind === "batch" ? `Part of container #${s.containerId}` : `${s.batches.length} batch(es)`}
+        subtitle={`${s.kind === "batch" ? `Part of container ${s.containerCode}` : `${s.batches.length} batch(es)`}${s.sealNumber ? ` · seal ${s.sealNumber}` : ""}`}
         action={<Badge tone="brand">{s.splitAt ? "Split into batches" : STAGE_LABELS[s.stage]}</Badge>}
       />
 
@@ -61,13 +61,13 @@ export function ShipmentPage() {
                 <Row label="Buyer">
                   <Party wallet={s.buyer} />
                 </Row>
-                <Row label="QA inspector">
+                <Row label="Quality Inspector">
                   <Party wallet={s.inspector} />
                 </Row>
               </>
             )}
-            <Row label="Importer">
-              <Party wallet={s.importer} />
+            <Row label="Supplier">
+              <Party wallet={s.supplier} />
             </Row>
             <Row label="Sensor">
               <span className="font-mono">{s.sensorId}</span>

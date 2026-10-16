@@ -13,7 +13,7 @@ const identity = api(`http://localhost:${env.IDENTITY_PORT}`);
 const oracle = api(`http://localhost:${env.ORACLE_PORT}`);
 
 const PERSONAS = [
-  { account: 4, role: "IMPORTER", org: "Merlion Fresh Imports", email: "ops@merlionfresh.example" },
+  { account: 4, role: "SUPPLIER", org: "Merlion Fresh Supplies", email: "ops@merlionfresh.example" },
   { account: 5, role: "CARRIER", org: "Equator Air Cargo", email: "ops@equatorair.example" },
   { account: 6, role: "HANDLER", org: "Runway Cargo Handlers", email: "ops@runwaycargo.example" },
   { account: 7, role: "COLD_STORE", org: "Merlion Fresh Cold Store", email: "coldstore@merlionfresh.example" },

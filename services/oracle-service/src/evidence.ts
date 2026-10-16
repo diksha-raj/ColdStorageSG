@@ -68,10 +68,41 @@ export async function commitEndedLegs() {
   }
 }
 
+/**
+ * Checks logs that custodians uploaded at handover, once their leg has ended and the sensor has
+ * committed. Each one is submitted exactly like an upload made after the handover.
+ */
+export async function processStagedUploads() {
+  const { rows } = await db.query("SELECT * FROM oracle.staged_uploads ORDER BY created_at");
+  for (const row of rows) {
+    const window = await custody().legWindow(row.shipment_id, row.leg);
+    const committedHash: string = await sensorOracle().committedHash(row.shipment_id, row.leg);
+    if (Number(window.end) === 0 || committedHash === ZeroHash) continue; // leg still open, or sensor not reported yet
+
+    const statuses = await Promise.all(
+      (await batchesFor(row.shipment_id, row.leg)).map(async (b) => STATUS[Number((await sensorOracle().getSummary(b, row.leg)).status)]),
+    );
+    if (statuses.some((st) => st !== "Verified")) {
+      const result = await submitUpload({
+        shipmentId: row.shipment_id,
+        leg: row.leg,
+        file: row.raw_file,
+        fileName: row.file_name,
+        uploadedBy: row.uploaded_by,
+        legStart: Number(window.start),
+        committedHash,
+      });
+      console.log(`oracle: checked handover log for shipment ${row.shipment_id} leg ${row.leg}: ${result.matches ? "matches" : "MISMATCH"}`);
+    }
+    await db.query("DELETE FROM oracle.staged_uploads WHERE shipment_id = $1 AND leg = $2", [row.shipment_id, row.leg]);
+  }
+}
+
 export function startSensorLoop(intervalMs = 3000) {
   const tick = async () => {
     try {
       await commitEndedLegs();
+      await processStagedUploads();
     } catch (err) {
       console.error("sensor commit failed:", (err as any).reason ?? (err as Error).message);
     }

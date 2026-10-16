@@ -13,6 +13,8 @@ import { type Browser, type Page, chromium } from "playwright-core";
 
 const BASE = process.env.E2E_WEB_URL ?? "http://localhost:5173";
 const SHOTS = process.env.SCREENSHOT_DIR ?? join(import.meta.dirname, "screenshots");
+const CONTAINER = /Container CCSU\d{7}/; // ISO 6346 number generated on-chain
+const SEAL = "SGB4471203";
 const MNEMONIC = "test test test test test test test test test test test junk";
 const provider = new JsonRpcProvider(process.env.RPC_URL ?? "http://127.0.0.1:8545", undefined, { cacheTimeout: -1 });
 const account = (i: number) => HDNodeWallet.fromPhrase(MNEMONIC, undefined, `m/44'/60'/0'/0/${i}`);
@@ -101,12 +103,16 @@ async function uploadLog(page: Page, legTitle: string, file: string, expect: "ma
 const card = (page: Page, name: RegExp) => page.locator("div.rounded-xl", { has: page.getByRole("link", { name }) }).first();
 
 /** Sender: open the handover form on a shipment card, sign a dispatch check, and hand over. */
-async function checkAndHandOver(page: Page, shipment: RegExp, button: RegExp, tempC: string) {
+async function checkAndHandOver(page: Page, shipment: RegExp, button: RegExp, tempC: string, sensorLog?: string) {
   await page.goto(`${BASE}/app`);
   const c = card(page, shipment);
   await c.getByRole("button", { name: button }).click();
   await c.getByLabel("Probe temperature at dispatch").fill(tempC);
-  await c.getByRole("button", { name: "Sign check & hand over" }).click();
+  // A handover that ends a sensor leg asks for that leg's log first.
+  if (sensorLog) await c.getByLabel(/^Leg \d sensor log$/).selectOption({ label: sensorLog });
+  // The supplier's dispatch also records the seal applied after loading.
+  if (await c.getByLabel("Seal number").count()) await c.getByLabel("Seal number").fill(SEAL);
+  await c.getByRole("button", { name: /sign check & hand over/i }).click();
   await c.getByText(/^Waiting for .* to accept/).waitFor({ timeout: 30_000 });
 }
 
@@ -156,8 +162,8 @@ test("landing page and onboarding: a new wallet requests access and the admin ap
   await visitor.getByRole("heading", { name: "Your deliveries" }).waitFor();
 });
 
-test("importer creates a container with two batches, logs a reading, and checks it out to the carrier", async () => {
-  const page = await signInAs("importer", account(4));
+test("supplier creates a container with two batches, logs a reading, and checks it out to the carrier", async () => {
+  const page = await signInAs("supplier", account(4));
   await page.getByRole("button", { name: "New container" }).click();
   await page.getByLabel("Origin").fill("Melbourne, AU");
 
@@ -166,52 +172,59 @@ test("importer creates a container with two batches, logs a reading, and checks 
     await batch(i).getByLabel("Product").fill(product);
     await batch(i).getByLabel("Quantity").fill("500");
     await batch(i).getByLabel("Buyer").selectOption({ label: buyer });
-    await batch(i).getByLabel("QA inspector").selectOption({ label: inspector });
+    await batch(i).getByLabel("Quality Inspector").selectOption({ label: inspector });
     await batch(i).getByLabel("Batch sensor").selectOption(sensor);
     await batch(i).getByLabel("Max °C").fill(maxC);
   };
   await fillBatch(0, "Chilled salmon fillets", "Tiong Bahru Grocers", "Tiong Bahru Grocers QA", "SENS-B-01", "4");
   await page.getByRole("button", { name: "Add another batch" }).click();
   await fillBatch(1, "Aged cheese", "Marina Bay Dining Group", "Marina Bay Dining QA", "SENS-B-02", "8");
+  // A typed container number is checked as you type (ISO 6346 check digit); blank means generate one.
+  const number = page.getByLabel("Container number (optional)");
+  await number.fill("MSKU9070324");
+  await page.getByText(/check digit .* doesn't match/).waitFor();
+  assert.equal(await page.getByRole("button", { name: "Create container" }).isDisabled(), true);
+  await number.fill("");
   await page.getByRole("button", { name: "Create container" }).click();
-  await page.getByRole("link", { name: "Container #1 from Melbourne, AU" }).waitFor({ timeout: 40_000 });
+  await page.getByRole("link", { name: /^Container CCSU\d{7} from Melbourne, AU$/ }).waitFor({ timeout: 40_000 });
 
   // Demo setup: the sensor will record a cooling failure on leg 2.
   await setRecording(2, "breach");
 
   // A spot reading at origin, then the dispatch check.
   await page.goto(`${BASE}/app`);
-  const c = card(page, /Container #1/);
+  const c = card(page, CONTAINER);
   await c.getByRole("button", { name: "Log temperature" }).click();
   await c.getByLabel("Probe °C").fill("2.8");
   await c.getByRole("button", { name: "Save reading" }).click();
   await c.getByText("2.8 °C").waitFor();
-  await checkAndHandOver(page, /Container #1/, /Check & hand over to the air carrier/, "2.9");
-  await shot(page, "05-importer-dispatched");
+  await checkAndHandOver(page, CONTAINER, /Check & hand over to Cargo/, "2.9");
+  await shot(page, "05-supplier-dispatched");
 });
 
-test("carrier inspects on pickup, reports a reefer failure in flight, and checks out at Changi", async () => {
+test("carrier inspects on pickup, reports a reefer failure in transit, and checks out at the destination", async () => {
   const carrier = await signInAs("carrier", account(5));
-  await inspectAndAccept(carrier, /Container #1/, "3.0");
+  await inspectAndAccept(carrier, CONTAINER, "3.0");
 
   await carrier.goto(`${BASE}/app`);
-  const c = card(carrier, /Container #1/);
+  const c = card(carrier, CONTAINER);
   await c.getByRole("button", { name: "Report issue" }).click();
   await c.getByLabel("Minutes without refrigeration").fill("25");
   await c.getByLabel("Description").fill("Reefer unit tripped during refuelling stop");
   await c.getByRole("button", { name: "Save issue report" }).click();
   await c.getByText("25 min unrefrigerated").waitFor();
-  await c.getByRole("button", { name: /Check & hand over to the Changi handler/ }).click();
+  await c.getByRole("button", { name: /Check & hand over to Destination Freight Handler/ }).click();
   await shot(carrier, "06-carrier-handover-check");
   await c.getByLabel("Probe temperature at dispatch").fill("5.2");
-  await c.getByRole("button", { name: "Sign check & hand over" }).click();
+  await c.getByLabel("Leg 1 sensor log").selectOption({ label: "Demo: Compliant log (stays below 4 °C)" });
+  await c.getByRole("button", { name: "Upload log, sign check & hand over" }).click();
   await c.getByText(/^Waiting for .* to accept/).waitFor({ timeout: 30_000 });
 });
 
 test("the handler finds it warm on receipt: the stage is flagged and QA sees it while the shipment is in transit", async () => {
   const handler = await signInAs("handler", account(6));
   await handler.goto(`${BASE}/app`);
-  const c = card(handler, /Container #1/);
+  const c = card(handler, CONTAINER);
   await c.getByRole("button", { name: /^Inspect & accept/ }).click();
   await c.getByLabel("Probe temperature on receipt").fill("7.1");
   await c.getByText("Accept with issues", { exact: true }).click();
@@ -220,8 +233,9 @@ test("the handler finds it warm on receipt: the stage is flagged and QA sees it 
   await c.getByRole("button", { name: "Sign check & accept custody" }).click();
   await handler.getByRole("button", { name: "Sign check & accept custody" }).waitFor({ state: "detached", timeout: 30_000 });
 
-  // The carrier's leg has ended: they upload its sensor log.
-  await uploadLog(pages.carrier, "Leg 1 · Air carrier", "Demo: Compliant log (stays below 4 °C)", "matches");
+  // The carrier uploaded its leg 1 log at handover; it's checked now that the handler has accepted.
+  await pages.carrier.goto(`${BASE}/app`);
+  await pages.carrier.locator("li", { hasText: "Leg 1 · Cargo" }).getByText("Evidence verified").waitFor({ timeout: 30_000 });
 
   // QA rules on the flagged stage now, mid-journey.
   const qa = await signInAs("tbInspector", account(10));
@@ -234,33 +248,33 @@ test("the handler finds it warm on receipt: the stage is flagged and QA sees it 
 });
 
 test("the rest of the journey: cold store, an edited log caught, truck, and the buyers' delivery checks", async () => {
-  await checkAndHandOver(pages.handler, /Container #1/, /Check & hand over to the importer cold store/, "3.5");
+  await checkAndHandOver(pages.handler, CONTAINER, /Check & hand over to Cold Store/, "3.5", "Demo: Breached log (~34 min above 4 °C)");
   const cold = await signInAs("coldStore", account(7));
-  await inspectAndAccept(cold, /Container #1/, "3.6");
-  await uploadLog(pages.handler, "Leg 2 · Changi handler", "Demo: Breached log (~34 min above 4 °C)", "matches");
+  await inspectAndAccept(cold, CONTAINER, "3.6");
 
   await cold.goto(`${BASE}/app`);
-  await card(cold, /Container #1/).getByRole("button", { name: "Split into batches" }).click();
+  // Splitting ends the cold store's leg: it uploads an edited leg 3 log, then splits.
+  await card(cold, CONTAINER).getByLabel("Leg 3 sensor log").selectOption({ label: "Demo: Edited log (breach removed)" });
+  await card(cold, CONTAINER).getByRole("button", { name: "Upload log & split into batches" }).click();
   await cold.getByRole("link", { name: /Batch #2 · Chilled salmon fillets/ }).waitFor({ timeout: 30_000 });
-  await uploadLog(cold, "Leg 3 · Importer cold store", "Demo: Edited log (breach removed)", "mismatch");
+  // Once the sensor reports, the edited log is caught.
+  await cold.getByText("The last file uploaded for this leg didn't match what the sensor recorded").waitFor({ timeout: 30_000 });
   await shot(cold, "09-cold-store-edited-log-caught");
-  await uploadLog(cold, "Leg 3 · Importer cold store", "Demo: Compliant log (stays below 4 °C)", "matches");
-  await checkAndHandOver(cold, /Batch #2/, /Check & hand over to the delivery truck/, "3.4");
-  await checkAndHandOver(cold, /Batch #3/, /Check & hand over to the delivery truck/, "3.4");
+  await uploadLog(cold, "Leg 3 · Cold Store", "Demo: Compliant log (stays below 4 °C)", "matches");
+  await checkAndHandOver(cold, /Batch #2/, /Check & hand over to Reefer Truck/, "3.4");
+  await checkAndHandOver(cold, /Batch #3/, /Check & hand over to Reefer Truck/, "3.4");
 
   const truck = await signInAs("truck", account(8));
   await inspectAndAccept(truck, /Batch #2/, "3.5");
   await inspectAndAccept(truck, /Batch #3/, "3.5");
-  await checkAndHandOver(truck, /Batch #2/, /Check & deliver to buyer/, "3.6");
-  await checkAndHandOver(truck, /Batch #3/, /Check & deliver to buyer/, "3.6");
+  await checkAndHandOver(truck, /Batch #2/, /Check & deliver to buyer/, "3.6", "Demo: Compliant log (stays below 4 °C)");
+  await checkAndHandOver(truck, /Batch #3/, /Check & deliver to buyer/, "3.6", "Demo: Compliant log (stays below 4 °C)");
 
   const tbBuyer = await signInAs("tbBuyer", account(9));
   await inspectAndAccept(tbBuyer, /Batch #2/, "3.7", { shot: "10-buyer-delivery-check" });
   const mbBuyer = await signInAs("mbBuyer", account(11));
   await inspectAndAccept(mbBuyer, /Batch #3/, "3.7");
 
-  await uploadLog(truck, "Leg 4 · Delivery truck · Batch #2", "Demo: Compliant log (stays below 4 °C)", "matches");
-  await uploadLog(truck, "Leg 4 · Delivery truck · Batch #3", "Demo: Compliant log (stays below 4 °C)", "matches");
   await pages.admin.goto(`${BASE}/app?tab=demo`);
   await pages.admin.getByRole("button", { name: "Sync now" }).click();
   await pages.admin.waitForTimeout(1500);
@@ -309,10 +323,47 @@ test("the printable certificate renders the full record and prints to an A4 PDF"
   await page.getByText("REJECTED: NOT TO BE SOLD").waitFor();
   await page.getByText("Upheld: custodian responsible").waitFor();
   await page.getByText(/CCSG-\d+-00002/).waitFor();
+  await page.getByText(SEAL).waitFor();
+  await page.getByText(/reported intact at 3 container handover\(s\)/).waitFor();
   await shot(page, "16-printable-certificate");
   await page.emulateMedia({ media: "print" });
   await page.pdf({ path: join(SHOTS, "certificate-batch-2.pdf"), format: "A4", printBackground: true });
   await page.emulateMedia({ media: "screen" });
+});
+
+test("the certificate's QR opens a public verification page with the batch's full transaction history", async () => {
+  const print = pages.tbBuyer;
+  await print.getByTestId("verify-qr").waitFor();
+  const url = await print.getByText(/\/verify\/2\?chain=/).textContent();
+  assert.ok(url);
+  await print.getByText(/Issued in tx/).waitFor();
+
+  // A stranger with no wallet and no session.
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const visitor = await ctx.newPage();
+  visitor.on("pageerror", (e) => pageErrors.push(`visitor: ${e.message}`));
+  visitor.setDefaultTimeout(20_000);
+  await visitor.goto(url!.trim());
+  const verdict = visitor.getByTestId("verify-verdict");
+  await verdict.getByText("certificate found on-chain").waitFor();
+  await verdict.getByText("rejected, not to be sold").waitFor();
+  await visitor.getByText(/^CCSU\d{7}$/).waitFor();
+  await visitor.getByText(SEAL, { exact: true }).waitFor();
+  const history = visitor.getByTestId("tx-history");
+  for (const step of ["Container registered", "Seal number recorded", "Handover accepted: receiver's quality check", "Sensor committed its log fingerprint", "Final certificate issued", "QA final decision", "Buyer acknowledged receipt"]) {
+    await history.getByText(step, { exact: true }).first().waitFor();
+  }
+  // Organisation names come from the public directory, never contact details.
+  await visitor.getByText(/\(Buyer\)/).first().waitFor();
+  assert.equal(await visitor.getByText("@").count(), 0);
+  await history.getByRole("button", { name: /Buyer acknowledged receipt/ }).click();
+  await history.getByText(/success · gas/).waitFor();
+  await shot(visitor, "17-public-verification");
+
+  // A certificate printed from another registry is called out.
+  await visitor.goto(url!.trim().replace(/registry=0x[0-9a-fA-F]+/, "registry=0x000000000000000000000000000000000000dEaD"));
+  await visitor.getByText(/may not be the one on the certificate/).waitFor();
+  await ctx.close();
 });
 
 test("admin overview and audit log render the live record", async () => {
