@@ -57,8 +57,8 @@ export function CertificatePrint() {
     return (
       <div className="mx-auto max-w-xl px-4 py-16">
         <Notice tone="info">
-          This batch's certificate hasn't been issued yet. It's issued once all five stages have their handover check and legs 1-4 have a
-          verified sensor log.
+          This batch's certificate hasn't been issued yet. It's issued once all five stages have their handover check and
+          verified sensor readings.
         </Notice>
         <Link to={`/shipments/${batchId}`} className="mt-4 inline-block text-sm text-brand-dark underline">
           Back to the batch
@@ -72,19 +72,20 @@ export function CertificatePrint() {
   const status = STATUS_TEXT[cert.certificate.status];
   const decision = cert.decision;
 
-  // The origin seal stays on the container until the cold store opens it to split (stages 0-2).
-  const sealChecks = s.checkpoints.filter((c) => c.stage <= 2 && c.incoming);
+  // Cargo's seal stays on the container through its two handovers, until the cold store unloads it.
+  const sealChecks = s.checkpoints.filter((c) => (c.stage === 1 || c.stage === 2) && c.incoming);
   const sealBroken = sealChecks.filter((c) => !c.incoming!.sealIntact).map((c) => c.stage);
   const sealSummary = sealBroken.length
     ? `reported broken on receipt at stage ${sealBroken.join(", ")}`
-    : `reported intact at ${sealChecks.length} container handover(s), then opened at the cold store for the split`;
+    : `reported intact at ${sealChecks.length} container handover(s), then opened at the cold store for unloading`;
+  const box = s.container;
 
   const rows = [0, 1, 2, 3, 4].map((stage) => {
     const lp = cert.legPasses.find((p) => p.leg === stage);
     const pass = lp && !lp.pending ? lp : null;
     const cp = s.checkpoints.find((c) => c.stage === stage);
-    const sensor = stage > 0 ? evidence.legs.find((l) => l.leg === stage)?.summary : null;
-    return { stage, pass, cp, sensor };
+    const ev = evidence.stages.find((x) => x.stage === stage);
+    return { stage, pass, cp, sensor: ev?.summary ?? null, sensorId: ev?.sensor?.sensorId ?? null };
   });
 
   return (
@@ -150,15 +151,29 @@ export function CertificatePrint() {
             </Item>
             <Item label="Batch / container">
               Batch #{s.id} · Container <span className="font-mono">{s.containerCode}</span>
+              {box?.details && (
+                <span className="text-muted">
+                  {" "}
+                  · {box.details.mode === "sea" ? "sea" : "air"}, {box.details.voyage}, {box.details.origin} → {box.details.destination}
+                </span>
+              )}
             </Item>
-            <Item label="Origin seal">
+            <Item label="Container seal">
               {s.sealNumber ? <span className="font-mono">{s.sealNumber}</span> : "—"}
-              <span className="text-muted"> · applied by {org(s.supplier)} before dispatch; {sealSummary}</span>
+              <span className="text-muted">
+                {" "}
+                · applied by {org(box?.holders[0])} after loading; {sealSummary}
+              </span>
             </Item>
             <Item label="Temperature rule">
               ≤ {s.thresholdC} °C, {s.graceMinutes} min grace period
             </Item>
-            <Item label="Sensors">{evidence.legs.map((l) => l.sensorId).filter((v, i, a) => a.indexOf(v) === i).join(", ")}</Item>
+            <Item label="Sensors">
+              {rows
+                .map((r) => r.sensorId)
+                .filter((v, i, a) => v && a.indexOf(v) === i)
+                .join(", ") || "—"}
+            </Item>
             <Item label="Supplier">{org(s.supplier)}</Item>
             <Item label="Buyer">{org(s.buyer)}</Item>
             <Item label="Quality Inspector">{org(s.inspector)}</Item>
@@ -172,10 +187,9 @@ export function CertificatePrint() {
               <tr className="border-b border-ink/30 text-[11px] uppercase tracking-wide text-muted">
                 <th className="py-1.5 pr-2 font-medium">Stage</th>
                 <th className="py-1.5 pr-2 font-medium">Held by</th>
-                <th className="py-1.5 pr-2 text-right font-medium">Dispatch</th>
-                <th className="py-1.5 pr-2 text-right font-medium">Receipt</th>
-                <th className="py-1.5 pr-2 text-right font-medium">Unrefr.</th>
                 <th className="py-1.5 pr-2 text-right font-medium">Sensor peak</th>
+                <th className="py-1.5 pr-2 text-right font-medium">Handover probe</th>
+                <th className="py-1.5 pr-2 text-right font-medium">Dock time</th>
                 <th className="py-1.5 font-medium">Verdict</th>
               </tr>
             </thead>
@@ -189,12 +203,13 @@ export function CertificatePrint() {
                     <div className="text-[11px] text-muted">{HANDOVER_NAMES[stage]}</div>
                   </td>
                   <td className="py-2 pr-2">{org(pass?.custodian)}</td>
-                  <td className="py-2 pr-2 text-right tabular-nums">{cp?.outgoing ? `${cp.outgoing.tempC.toFixed(1)} °C` : "—"}</td>
-                  <td className="py-2 pr-2 text-right tabular-nums">{cp?.incoming ? `${cp.incoming.tempC.toFixed(1)} °C` : "—"}</td>
-                  <td className="py-2 pr-2 text-right tabular-nums">{pass ? `${pass.unrefrigeratedMinutes} min` : "—"}</td>
                   <td className="py-2 pr-2 text-right tabular-nums">
-                    {stage === 0 ? "n/a" : sensor ? `${sensor.maxC.toFixed(1)} °C${sensor.breachMinutes ? ` · ${sensor.breachMinutes} min over` : ""}` : "—"}
+                    {sensor ? `${sensor.maxC.toFixed(1)} °C${sensor.breachMinutes ? ` · ${sensor.breachMinutes} min over` : ""}` : "—"}
                   </td>
+                  <td className="py-2 pr-2 text-right tabular-nums">
+                    {cp?.outgoing && cp.incoming ? `${cp.outgoing.tempC.toFixed(1)} → ${cp.incoming.tempC.toFixed(1)} °C` : "—"}
+                  </td>
+                  <td className="py-2 pr-2 text-right tabular-nums">{stage === 1 ? "n/a" : pass ? `${pass.gapMinutes} min` : "—"}</td>
                   <td className="py-2">
                     {pass?.status === "pass" ? (
                       <span className="font-semibold text-pass">PASS</span>
@@ -261,8 +276,8 @@ export function CertificatePrint() {
             <p className="text-muted">
               Scan the code, or open the link below, to see this certificate and every transaction behind it read live from the blockchain. No
               sign-in is needed. Any difference from this paper copy means it was altered. You can also call{" "}
-              <span className="font-mono">getCertificate({cert.batchId})</span> on the CertificateRegistry contract yourself, and compare each sensor
-              log's SHA-256 with <span className="font-mono">SensorOracle.verifyFileHash</span>.
+              <span className="font-mono">getCertificate({cert.batchId})</span> on the CertificateRegistry contract yourself, and compare each stage's
+              sensor readings' SHA-256 with <span className="font-mono">SensorOracle.verifyFileHash</span>.
               <span className="mt-1 block break-all font-mono text-[11px] text-ink">{verifyUrl}</span>
             </p>
           </div>
@@ -272,8 +287,8 @@ export function CertificatePrint() {
             <dt className="text-muted">CertificateRegistry</dt>
             <dd className="break-all">{chain.registry}</dd>
             <FragmentRow label="Issued in tx" value={issuance ? `${issuance.hash} (block ${issuance.blockNumber})` : "—"} />
-            {evidence.legs.map((l) => (
-              <FragmentRow key={l.leg} label={`Leg ${l.leg} sensor log`} value={l.summary?.fileHash ?? "—"} />
+            {evidence.stages.map((st) => (
+              <FragmentRow key={st.stage} label={`Stage ${st.stage} sensor readings`} value={st.summary?.fileHash ?? "—"} />
             ))}
             {rows.map(({ stage, cp }) =>
               cp?.incoming ? <FragmentRow key={`n${stage}`} label={`Stage ${stage} receipt notes`} value={cp.incoming.notesHash} /> : null,

@@ -30,7 +30,7 @@ export function InspectorDashboard() {
         subtitle="You decide two things: who is responsible for each flagged stage, and whether each batch is fit for sale."
       />
 
-      <Card title="Flagged stages to rule on" subtitle="Opened automatically when a handover check fails or a sensor log shows a breach, even mid-journey.">
+      <Card title="Flagged stages to rule on" subtitle="Opened automatically when a handover check fails, a handover takes too long, or a holder's sensor shows a breach, even mid-journey.">
         {openClaims.length === 0 ? <Empty>Nothing waiting for a ruling.</Empty> : <ClaimList claims={openClaims} unit={unit} />}
       </Card>
 

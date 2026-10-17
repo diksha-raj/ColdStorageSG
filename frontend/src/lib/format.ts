@@ -27,7 +27,7 @@ export const ROLE_LABELS: Record<Role, string> = {
 export const REQUESTABLE_ROLES: Role[] = ["SUPPLIER", "CARRIER", "HANDLER", "COLD_STORE", "TRUCK", "BUYER", "INSPECTOR"];
 
 export const STAGE_LABELS: Record<string, string> = {
-  Origin: "At origin",
+  Origin: "With Supplier",
   Carrier: "With Cargo",
   Handler: "With Destination Freight Handler",
   ColdStore: "At Cold Store",
@@ -35,9 +35,9 @@ export const STAGE_LABELS: Record<string, string> = {
   Delivered: "Delivered",
 };
 
-/** Stage names. Stage 0 is the supplier's dispatch from origin; 1-4 are the custody legs. */
+/** Stage names: who holds the batch. Stage 0 is the supplier's own cold room. */
 export const LEG_NAMES: Record<number, string> = {
-  0: "Origin dispatch",
+  0: "Supplier",
   1: "Cargo",
   2: "Destination Freight Handler",
   3: "Cold Store",
@@ -70,8 +70,6 @@ export function formatTime(unix?: number | null) {
 export const formatDate = (iso?: string | null) =>
   iso ? new Date(iso).toLocaleDateString("en-SG", { day: "numeric", month: "short", year: "numeric" }) : "—";
 
-export const unitLabel = (u: { kind: string; id: number; containerCode: string }) =>
-  u.kind === "container" ? `Container ${u.containerCode}` : `Batch #${u.id}`;
 
 /** The handover that closes each stage: "<from> → <to>". */
 export const HANDOVER_NAMES: Record<number, string> = {
@@ -83,10 +81,27 @@ export const HANDOVER_NAMES: Record<number, string> = {
 };
 
 export const REASON_LABELS: Record<string, string> = {
-  sensor_excursion: "Sensor log above limit too long",
+  sensor_excursion: "Sensor above limit too long",
   receipt_temp: "Too warm on receipt",
-  unrefrigerated: "Too long without refrigeration",
+  handover_gap: "Too long on the dock at handover",
   condition: "Damage, broken seal or reported issue",
+  missing_data: "Sensor readings missing too long",
+};
+
+/** Whose sensor covers each stage, and what it is. */
+export const SENSOR_OF_STAGE: Record<number, { owner: string; what: string }> = {
+  0: { owner: "Supplier", what: "cold-room sensor" },
+  1: { owner: "Cargo", what: "container sensor" },
+  2: { owner: "Cargo", what: "container sensor (still reading while the handler holds it)" },
+  3: { owner: "Cold Store", what: "cold-room sensor" },
+  4: { owner: "Reefer Truck", what: "truck sensor" },
+};
+
+/** How a sensor reads, as registered with the sensor gateway. */
+export const SENSOR_MODES: Record<string, string> = {
+  feed: "Own sensor",
+  compliant: "Demo: compliant",
+  breached: "Demo: breached",
 };
 
 export const ISSUE_CATEGORIES: Record<string, string> = {
@@ -98,13 +113,11 @@ export const ISSUE_CATEGORIES: Record<string, string> = {
   other: "Other",
 };
 
-/** Where a batch is: before the split it travels inside its container, so use the container's stage. */
-export function whereIs(u: { kind: string; stage: string; containerCode: string; container?: { stage: string; splitAt: number | null } }) {
-  if (u.kind === "batch" && u.stage === "Origin" && u.container) {
-    const where = u.container.splitAt ? "split" : STAGE_LABELS[u.container.stage];
-    return `In container ${u.containerCode} · ${where[0].toLowerCase()}${where.slice(1)}`; // "with Destination Freight Handler"
-  }
-  return STAGE_LABELS[u.stage];
+/** Where a batch is, naming its container while it travels inside one. */
+export function whereIs(u: { kind: string; stage: string; containerCode: string | null; inContainer?: boolean }) {
+  const where = STAGE_LABELS[u.stage];
+  if (u.kind === "batch" && u.inContainer) return `In container ${u.containerCode} · ${where[0].toLowerCase()}${where.slice(1)}`;
+  return where;
 }
 
 /**

@@ -5,16 +5,20 @@ import {ParticipantRegistry} from "./ParticipantRegistry.sol";
 import {ShipmentCustody} from "./ShipmentCustody.sol";
 
 /// @title SensorOracle
-/// @notice Tamper-evident sensor evidence for each custody leg.
+/// @notice Tamper-evident sensor readings for every stage a batch passes through.
 ///
-/// Two steps per leg:
-///   1. The registered sensor device commits the SHA-256 of its raw CSV once the leg has ended.
-///      One commit per physical file: legs 1-3 are committed on the container, leg 4 on the batch.
-///   2. The oracle replays the CSV it holds and submits a summary per batch (each batch has its
-///      own threshold). If the oracle's file hash differs from the sensor's commit, the leg is
-///      marked EvidenceMismatch and no LegPass can be issued until a matching file is resubmitted.
+/// Each custodian's sensor is registered in ShipmentCustody against the stage it covers. Two steps
+/// per stage window:
+///   1. Once the window has closed, the sensor itself (its device key, via the sensor gateway)
+///      commits the SHA-256 of its readings for that window. Stages 1-2 are committed once per
+///      container; the others per batch.
+///   2. The oracle fetches those readings, summarises them for each batch against the batch's own
+///      limit (each batch's own entry and exit inside a container window), and submits the summary
+///      with the hash of the readings it used. If that hash differs from the sensor's commit, the
+///      readings were altered after the sensor reported: the stage is marked EvidenceMismatch and
+///      no LegPass can be issued until the genuine readings are submitted.
 ///
-/// Raw readings stay off-chain; only the hash and summary are recorded here.
+/// Raw readings stay off-chain; only hashes and summaries are recorded here.
 contract SensorOracle {
     enum Status {
         None,
@@ -23,11 +27,12 @@ contract SensorOracle {
     }
 
     struct LegSummary {
-        bytes32 fileHash; // SHA-256 of the CSV the oracle replayed
+        bytes32 fileHash; // SHA-256 of the readings the oracle summarised
         int16 minTenthsC;
         int16 maxTenthsC;
-        uint32 breachMinutes; // longest continuous run above the batch threshold
-        uint64 breachStart; // 0 if no reading was above the threshold
+        uint32 breachMinutes; // longest continuous run above the batch's limit, in minutes
+        uint32 missingMinutes; // minutes of the batch's window with no readings
+        uint64 breachStart; // 0 if no reading was above the limit
         uint64 breachEnd;
         uint64 submittedAt;
         Status status;
@@ -36,14 +41,12 @@ contract SensorOracle {
     ParticipantRegistry public immutable registry;
     ShipmentCustody public immutable custody;
 
-    mapping(bytes32 => address) public sensorDevice; // sensorId => device wallet
-    mapping(uint256 => mapping(uint8 => bytes32)) public committedHash; // [container or batch][leg]
-    mapping(uint256 => mapping(uint8 => LegSummary)) internal summaries; // [batch][leg]
+    mapping(uint256 => mapping(uint8 => bytes32)) public committedHash; // [container or batch][stage]
+    mapping(uint256 => mapping(uint8 => LegSummary)) internal summaries; // [batch][stage]
 
-    event SensorRegistered(bytes32 indexed sensorId, address indexed device);
-    event FileHashCommitted(uint256 indexed shipmentId, uint8 indexed leg, bytes32 indexed sensorId, bytes32 fileHash);
-    event LegSummarySubmitted(uint256 indexed batchId, uint8 indexed leg, bytes32 fileHash, Status status);
-    event EvidenceMismatch(uint256 indexed batchId, uint8 indexed leg, bytes32 committedHash, bytes32 submittedHash);
+    event FileHashCommitted(uint256 indexed shipmentId, uint8 indexed stage, bytes32 indexed sensorId, bytes32 fileHash);
+    event LegSummarySubmitted(uint256 indexed batchId, uint8 indexed stage, bytes32 fileHash, Status status);
+    event EvidenceMismatch(uint256 indexed batchId, uint8 indexed stage, bytes32 committedHash, bytes32 submittedHash);
 
     constructor(ParticipantRegistry _registry, ShipmentCustody _custody) {
         registry = _registry;
@@ -55,36 +58,27 @@ contract SensorOracle {
         _;
     }
 
-    function registerSensor(bytes32 sensorId, address device) external whenSystemActive {
-        require(registry.hasRole(registry.DEFAULT_ADMIN_ROLE(), msg.sender), "not admin");
-        require(sensorId != bytes32(0) && device != address(0), "sensor id and device required");
-        require(sensorDevice[sensorId] == address(0), "sensor already registered");
-
-        sensorDevice[sensorId] = device;
-        emit SensorRegistered(sensorId, device);
-    }
-
-    /// @notice Called by the sensor device at the end of a leg. `shipmentId` may be a container
-    ///         or batch id; the commit is stored on whichever unit the leg is recorded on.
-    function commitFileHash(uint256 shipmentId, uint8 leg, bytes32 fileHash) external whenSystemActive {
-        (, , uint64 end, bytes32 sensorId, uint256 recordedOn) = custody.legWindow(shipmentId, leg);
-        address device = sensorDevice[sensorId];
-        require(device != address(0) && device == msg.sender, "not the registered sensor for this leg");
-        require(end != 0, "leg not finished");
+    /// @notice Called by the sensor's device key once its window on `shipmentId` (a container for
+    ///         stages 1-2, a batch otherwise) has closed.
+    function commitFileHash(uint256 shipmentId, uint8 stage, bytes32 fileHash) external whenSystemActive {
+        (ShipmentCustody.Sensor memory sensor,, uint64 end) = custody.sensorWindow(shipmentId, stage);
+        require(sensor.device != address(0) && sensor.device == msg.sender, "not the registered sensor for this stage");
+        require(end != 0, "stage not finished");
         require(fileHash != bytes32(0), "empty hash");
-        require(committedHash[recordedOn][leg] == bytes32(0), "leg already committed");
+        require(committedHash[shipmentId][stage] == bytes32(0), "stage already committed");
 
-        committedHash[recordedOn][leg] = fileHash;
-        emit FileHashCommitted(recordedOn, leg, sensorId, fileHash);
+        committedHash[shipmentId][stage] = fileHash;
+        emit FileHashCommitted(shipmentId, stage, sensor.sensorId, fileHash);
     }
 
     function submitLegSummary(
         uint256 batchId,
-        uint8 leg,
+        uint8 stage,
         bytes32 fileHash,
         int16 minTenthsC,
         int16 maxTenthsC,
         uint32 breachMinutes,
+        uint32 missingMinutes,
         uint64 breachStart,
         uint64 breachEnd
     ) external whenSystemActive {
@@ -93,31 +87,35 @@ contract SensorOracle {
         require(minTenthsC <= maxTenthsC, "min above max");
         require(breachStart <= breachEnd, "breach ends before it starts");
 
-        (, , , , uint256 recordedOn) = custody.legWindow(batchId, leg);
-        bytes32 committed = committedHash[recordedOn][leg];
-        require(committed != bytes32(0), "sensor has not committed this leg");
+        bytes32 committed = committedHash[custody.recordedOn(batchId, stage)][stage];
+        require(committed != bytes32(0), "sensor has not committed this stage");
 
-        LegSummary storage s = summaries[batchId][leg];
-        // One accepted submission per (batch, leg). A mismatched one may be replaced.
-        require(s.status != Status.Verified, "leg already submitted");
+        LegSummary storage s = summaries[batchId][stage];
+        // One accepted submission per (batch, stage). A mismatched one may be replaced.
+        require(s.status != Status.Verified, "stage already submitted");
 
         Status status = fileHash == committed ? Status.Verified : Status.EvidenceMismatch;
-        summaries[batchId][leg] = LegSummary(
-            fileHash, minTenthsC, maxTenthsC, breachMinutes, breachStart, breachEnd, uint64(block.timestamp), status
-        );
+        s.fileHash = fileHash;
+        s.minTenthsC = minTenthsC;
+        s.maxTenthsC = maxTenthsC;
+        s.breachMinutes = breachMinutes;
+        s.missingMinutes = missingMinutes;
+        s.breachStart = breachStart;
+        s.breachEnd = breachEnd;
+        s.submittedAt = uint64(block.timestamp);
+        s.status = status;
 
-        emit LegSummarySubmitted(batchId, leg, fileHash, status);
-        if (status == Status.EvidenceMismatch) emit EvidenceMismatch(batchId, leg, committed, fileHash);
+        emit LegSummarySubmitted(batchId, stage, fileHash, status);
+        if (status == Status.EvidenceMismatch) emit EvidenceMismatch(batchId, stage, committed, fileHash);
     }
 
-    /// @notice Anyone holding a CSV can check it against the sensor's on-chain commit.
-    function verifyFileHash(uint256 shipmentId, uint8 leg, bytes32 fileHash) external view returns (bool) {
-        (, , , , uint256 recordedOn) = custody.legWindow(shipmentId, leg);
-        bytes32 committed = committedHash[recordedOn][leg];
+    /// @notice Anyone holding a readings file can check it against the sensor's commit.
+    function verifyFileHash(uint256 shipmentId, uint8 stage, bytes32 fileHash) external view returns (bool) {
+        bytes32 committed = committedHash[custody.recordedOn(shipmentId, stage)][stage];
         return committed != bytes32(0) && committed == fileHash;
     }
 
-    function getSummary(uint256 batchId, uint8 leg) external view returns (LegSummary memory) {
-        return summaries[batchId][leg];
+    function getSummary(uint256 batchId, uint8 stage) external view returns (LegSummary memory) {
+        return summaries[batchId][stage];
     }
 }

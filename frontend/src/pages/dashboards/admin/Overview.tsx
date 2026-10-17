@@ -18,7 +18,7 @@ type Kpis = {
   claimsByLeg: { leg: number; claims: number }[];
   checkpoints: { completed: number; flagged: number };
   flagReasons: Record<string, number>;
-  unrefrigeratedMinutesByLeg: { leg: number; minutes: number }[];
+  gapMinutesByStage: { leg: number; minutes: number }[];
   dispositions: { released: number; rejected: number; awaiting: number };
 };
 
@@ -74,9 +74,9 @@ export function Overview() {
               </BarChart>
             </ResponsiveContainer>
           </div>
-          <h3 className="mb-2 mt-6 text-sm font-semibold">Minutes without refrigeration, by stage</h3>
+          <h3 className="mb-2 mt-6 text-sm font-semibold">Minutes on the dock at handover, unrefrigerated, by the stage it closed</h3>
           <dl className="grid grid-cols-5 gap-2 text-center text-sm">
-            {k.unrefrigeratedMinutesByLeg.map((d) => (
+            {k.gapMinutesByStage.map((d) => (
               <div key={d.leg} className="rounded-lg bg-canvas px-2 py-2">
                 <dd className="font-semibold tabular-nums">{d.minutes}</dd>
                 <dt className="text-xs text-muted">{LEG_NAMES[d.leg]}</dt>

@@ -1,4 +1,4 @@
-// A claim: the breach evidence for the flagged leg, who held the batch, and the inspector's
+// A claim: the evidence for the flagged stage, who held the batch, and the inspector's
 // signed resolution. Resolutions record an outcome only; any settlement happens off-platform.
 import { ArrowLeft, PenLine } from "lucide-react";
 import { type FormEvent, useState } from "react";
@@ -15,7 +15,7 @@ import { useAction, useApi } from "../lib/hooks";
 import type { Claim, Outcome, ShipmentDetail } from "../lib/types";
 
 const OUTCOMES: { value: Outcome; index: number; label: string; description: string }[] = [
-  { value: "upheld", index: 0, label: "Upheld", description: "The breach happened on this leg and the custodian is responsible." },
+  { value: "upheld", index: 0, label: "Upheld", description: "The problem happened on this stage and its holder is responsible." },
   { value: "overturned", index: 1, label: "Overturned", description: "The evidence doesn't hold up, e.g. a misplaced probe. The claim is dismissed." },
   {
     value: "compensation_agreed",
@@ -100,7 +100,7 @@ export function ClaimPage() {
         totalStages={1}
         showSummary={false}
       />
-      {claim.leg > 0 && <LegEvidence batchId={claim.batchId} onlyLeg={claim.leg} />}
+      <LegEvidence batchId={claim.batchId} onlyLeg={claim.leg} />
       <CertificatePanel batchId={claim.batchId} buyer={batch.buyer} inspector={batch.inspector} />
       <InspectionNotes claim={claim} canAdd={canNote} onAdded={reload} />
     </div>

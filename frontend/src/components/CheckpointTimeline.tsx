@@ -1,7 +1,8 @@
-// The handover checkpoints of a shipment: both parties' signed checks side by side, what they
-// logged during their leg, and which stages were flagged and why. Answers "where did it go wrong?"
+// The handover checks of a shipment: both parties' signed checks side by side (the sender's
+// sign-off is the exit time, the receiver's sign-in the entry time), what they logged while they
+// held it, and which stages were flagged and why. Answers "where did it go wrong?"
 import { CheckCircle2, CircleAlert, Clock, Thermometer } from "lucide-react";
-import { HANDOVER_NAMES, ISSUE_CATEGORIES, REASON_LABELS } from "../lib/format";
+import { HANDOVER_NAMES, ISSUE_CATEGORIES, LEG_NAMES, REASON_LABELS, formatTime } from "../lib/format";
 import type { Check, Checkpoint, StageStatus } from "../lib/types";
 import { CheckSummary } from "./HandoverActions";
 import { Badge, Card, Party } from "./ui";
@@ -26,7 +27,7 @@ export function CheckpointTimeline({
   const first = flagged[0];
 
   return (
-    <Card title={title} subtitle="Each handover is signed by both sides: what the sender dispatched and what the receiver found.">
+    <Card title={title} subtitle="Each handover is signed by both sides: what the sender handed over and what the receiver found.">
       {stages && showSummary && (
         <div className="mb-5">
           {first ? (
@@ -37,7 +38,7 @@ export function CheckpointTimeline({
                   {flagged.length} of {totalStages} stages flagged
                 </div>
                 <div className="text-sm">
-                  Problem first detected at <strong>{HANDOVER_NAMES[first.stage]}</strong>:{" "}
+                  Problem first detected while with <strong>{LEG_NAMES[first.stage]}</strong>:{" "}
                   {first.reasons.map((r) => REASON_LABELS[r].toLowerCase()).join(", ")}.
                 </div>
               </div>
@@ -85,8 +86,8 @@ export function CheckpointTimeline({
               {cp.incoming && cp.outgoing && (
                 <>
                   <div className="mt-3 grid gap-3 md:grid-cols-2">
-                    <Side title="Sender's check" check={cp.outgoing} />
-                    <Side title="Receiver's check" check={cp.incoming} />
+                    <Side title="Sign-off" check={cp.outgoing} />
+                    <Side title="Sign-in" check={cp.incoming} />
                   </div>
                   {Math.abs(cp.outgoing.tempC - cp.incoming.tempC) > DISCREPANCY_C && (
                     <p className="mt-2 text-xs text-warn">
@@ -108,13 +109,13 @@ function Side({ title, check }: { title: string; check: Check }) {
   return (
     <div className="rounded-lg bg-canvas p-3 text-sm">
       <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted">
-        {title} · <Party wallet={check.by} inline />
+        {title} · <Party wallet={check.by} inline /> · {formatTime(check.checkedAt)}
       </div>
       <CheckSummary check={check} />
       {sealed?.note && <p className="mt-1.5 text-muted">“{sealed.note}”</p>}
       {sealed?.readings && sealed.readings.length > 0 && (
         <details className="mt-1.5">
-          <summary className="cursor-pointer text-xs text-brand-dark">{sealed.readings.length} reading(s) during the leg</summary>
+          <summary className="cursor-pointer text-xs text-brand-dark">{sealed.readings.length} spot reading(s) while held</summary>
           <ul className="mt-1 space-y-0.5 text-xs">
             {sealed.readings.map((r, i) => (
               <li key={i} className="flex items-center gap-1.5 tabular-nums">
@@ -134,7 +135,7 @@ function Side({ title, check }: { title: string; check: Check }) {
           {sealed.issues.map((x, i) => (
             <li key={i}>
               <span className="font-medium text-warn">{ISSUE_CATEGORIES[x.category] ?? x.category}</span>
-              {x.unrefrigeratedMinutes > 0 && ` · ${x.unrefrigeratedMinutes} min unrefrigerated`} · {x.description}
+              {x.unrefrigeratedMinutes > 0 && ` · ${x.unrefrigeratedMinutes} min affected`} · {x.description}
             </li>
           ))}
         </ul>

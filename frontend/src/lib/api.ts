@@ -1,4 +1,4 @@
-// Calls the four backend services directly (no gateway). The session token comes from the
+// Calls the five backend services directly (no API gateway). The session token comes from the
 // Identity Service after Sign-In with Ethereum and is accepted by every service.
 
 const URLS = {
@@ -6,6 +6,7 @@ const URLS = {
   custody: import.meta.env.VITE_CUSTODY_URL ?? "http://localhost:4002",
   oracle: import.meta.env.VITE_ORACLE_URL ?? "http://localhost:4003",
   certificate: import.meta.env.VITE_CERTIFICATE_URL ?? "http://localhost:4004",
+  gateway: import.meta.env.VITE_GATEWAY_URL ?? "http://localhost:4005", // the sensor gateway
 };
 
 export type Service = keyof typeof URLS;
@@ -45,11 +46,3 @@ export async function api<T = any>(
   return data as T;
 }
 
-/** Fetches raw bytes (e.g. a sensor CSV) with the session token. */
-export async function fetchBytes(service: Service, path: string): Promise<ArrayBuffer> {
-  const res = await fetch(serviceUrl(service, path), {
-    headers: token ? { authorization: `Bearer ${token}` } : {},
-  });
-  if (!res.ok) throw new ApiError(res.status, `Download failed (${res.status})`);
-  return res.arrayBuffer();
-}

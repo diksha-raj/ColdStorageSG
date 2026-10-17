@@ -89,7 +89,7 @@ const STATUS: Record<string, { tone: Tone; label: string }> = {
   open: { tone: "warn", label: "Open claim" },
   pending: { tone: "warn", label: "Pending" },
   awaiting: { tone: "warn", label: "Awaiting evidence" },
-  "awaiting-upload": { tone: "warn", label: "Awaiting log upload" },
+  live: { tone: "brand", label: "Live" },
   EvidenceMismatch: { tone: "fail", label: "Hash mismatch" },
   breach: { tone: "fail", label: "Breach" },
   upheld: { tone: "fail", label: "Upheld" },

@@ -4,16 +4,18 @@ export const schemaSql = `
 CREATE SCHEMA IF NOT EXISTS custody;
 
 CREATE TABLE IF NOT EXISTS custody.containers (
-  id              INTEGER PRIMARY KEY,   -- on-chain container id
+  id              INTEGER PRIMARY KEY,   -- on-chain container id (opened by Cargo)
+  mode            TEXT NOT NULL CHECK (mode IN ('air', 'sea')),
+  voyage          TEXT NOT NULL,         -- flight or vessel/voyage number
   origin          TEXT NOT NULL,
+  destination     TEXT NOT NULL,
   departure_date  DATE NOT NULL,
   tx_hash         TEXT NOT NULL,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS custody.batches (
-  id            INTEGER PRIMARY KEY,     -- on-chain batch id
-  container_id  INTEGER NOT NULL,
+  id            INTEGER PRIMARY KEY,     -- on-chain batch id (created by the supplier)
   product       TEXT NOT NULL,
   quantity      NUMERIC NOT NULL,
   unit          TEXT NOT NULL,

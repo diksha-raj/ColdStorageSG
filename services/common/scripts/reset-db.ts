@@ -5,7 +5,7 @@ import { db, env } from "../src/index.ts";
 if (env.CHAIN_NETWORK !== "localhost" && env.CHAIN_NETWORK !== "e2e") {
   console.log(`Skipping DB reset on ${env.CHAIN_NETWORK}`);
 } else {
-  for (const schema of ["identity", "custody", "oracle", "certificate"]) {
+  for (const schema of ["identity", "custody", "oracle", "certificate", "gateway"]) {
     await db.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
   }
   console.log("Reset off-chain schemas (restart running services to recreate tables)");

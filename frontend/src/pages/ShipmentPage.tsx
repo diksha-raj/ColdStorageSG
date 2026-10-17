@@ -8,7 +8,7 @@ import { HandoverActions } from "../components/HandoverActions";
 import { LegEvidence } from "../components/LegEvidence";
 import { ShipmentCard, unitTitle } from "../components/ShipmentCard";
 import { Badge, Card, Loading, Notice, PageHeader, Party } from "../components/ui";
-import { STAGE_LABELS, formatDate, formatTime } from "../lib/format";
+import { LEG_NAMES, STAGE_LABELS, formatDate, formatTime, whereIs } from "../lib/format";
 import { useAuth } from "../auth";
 import { useApi } from "../lib/hooks";
 import type { BatchCertificate, ShipmentDetail } from "../lib/types";
@@ -22,8 +22,8 @@ export function ShipmentPage() {
 
   if (loading && !s) return <Loading />;
   if (error || !s) return <Notice tone="error">{error ?? "Shipment not found."}</Notice>;
-  // The current holder can log readings and report issues until they hand over (not once split or delivered).
-  const holding = session?.wallet === s.custodian && !s.splitAt && s.stage !== "Delivered";
+  // The current holder can log spot readings and report issues until they hand over (not once unloaded or delivered).
+  const holding = session?.wallet === s.custodian && !s.unloadedAt && !s.inContainer && s.stage !== "Delivered";
 
   return (
     <div className="space-y-6">
@@ -32,8 +32,8 @@ export function ShipmentPage() {
       </Link>
       <PageHeader
         title={unitTitle(s)}
-        subtitle={`${s.kind === "batch" ? `Part of container ${s.containerCode}` : `${s.batches.length} batch(es)`}${s.sealNumber ? ` · seal ${s.sealNumber}` : ""}`}
-        action={<Badge tone="brand">{s.splitAt ? "Split into batches" : STAGE_LABELS[s.stage]}</Badge>}
+        subtitle={`${s.kind === "batch" ? (s.containerCode ? `Shipped in container ${s.containerCode}` : "Not loaded yet") : `${s.batches.length} batch(es)`}${s.sealNumber ? ` · seal ${s.sealNumber}` : ""}`}
+        action={<Badge tone="brand">{s.unloadedAt ? "Unloaded at the cold store" : whereIs(s)}</Badge>}
       />
 
       {/* Hidden when the signed-in wallet has nothing to do on this shipment. */}
@@ -47,8 +47,12 @@ export function ShipmentPage() {
           <dl className="space-y-3 text-sm">
             {s.kind === "container" ? (
               <>
-                <Row label="Origin">{s.details?.origin ?? "—"}</Row>
+                <Row label="Mode">{s.details ? `${s.details.mode === "sea" ? "Sea" : "Air"} · ${s.details.voyage}` : "—"}</Row>
+                <Row label="Route">{s.details ? `${s.details.origin} → ${s.details.destination}` : "—"}</Row>
                 <Row label="Departure">{formatDate(s.details?.departureDate)}</Row>
+                <Row label="Opened by">
+                  <Party wallet={s.holders[0]} />
+                </Row>
               </>
             ) : (
               <>
@@ -64,27 +68,34 @@ export function ShipmentPage() {
                 <Row label="Quality Inspector">
                   <Party wallet={s.inspector} />
                 </Row>
+                <Row label="Supplier">
+                  <Party wallet={s.supplier} />
+                </Row>
               </>
             )}
-            <Row label="Supplier">
-              <Party wallet={s.supplier} />
-            </Row>
-            <Row label="Sensor">
-              <span className="font-mono">{s.sensorId}</span>
+            <Row label="Sensors">
+              {s.sensors.length === 0 ? (
+                "None registered yet"
+              ) : (
+                <ul className="space-y-1">
+                  {s.sensors.map((x) => (
+                    <li key={x.stage}>
+                      <span className="text-muted">{LEG_NAMES[x.stage]}: </span>
+                      <span className="font-mono">{x.sensorId}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </Row>
           </dl>
         </Card>
 
-        <Card title="Custody timeline" subtitle="Each handover is recorded on-chain when the next custodian accepts." className="lg:col-span-3">
+        <Card title="Custody timeline" subtitle="Each entry is the moment the holder signed it in, recorded on-chain." className="lg:col-span-3">
           <ol className="relative space-y-4 border-l border-line pl-5">
             {s.history.map((h, i) => (
               <li key={i} className="relative">
                 <span className="absolute -left-[26px] top-1 size-3 rounded-full border-2 border-white bg-brand ring-1 ring-brand" />
-                <div className="text-sm font-medium">
-                  {i > 0 && h.stage === "ColdStore" && s.history[i - 1].stage === "ColdStore"
-                    ? "Split from container"
-                    : STAGE_LABELS[h.stage]}
-                </div>
+                <div className="text-sm font-medium">{STAGE_LABELS[h.stage]}</div>
                 <div className="text-sm">
                   <Party wallet={h.custodian} inline />
                   <span className="text-muted"> · {formatTime(h.startedAt)}</span>
@@ -96,7 +107,7 @@ export function ShipmentPage() {
                 <span className="absolute -left-[26px] top-1 size-3 rounded-full border-2 border-white bg-warn-soft ring-1 ring-warn" />
                 <div className="text-sm font-medium text-warn">Handover pending</div>
                 <div className="text-sm">
-                  Waiting for <Party wallet={s.pendingTo} inline /> to accept
+                  Signed off; waiting for <Party wallet={s.pendingTo} inline /> to sign it in
                 </div>
               </li>
             )}
@@ -107,7 +118,7 @@ export function ShipmentPage() {
       <CheckpointTimeline
         checkpoints={s.checkpoints}
         stages={cert?.stages}
-        totalStages={s.kind === "batch" ? 5 : 3}
+        totalStages={s.kind === "batch" ? 5 : 2}
       />
 
       {s.kind === "container" ? (

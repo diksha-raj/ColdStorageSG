@@ -1,38 +1,50 @@
 # ColdChainSG
 
-A prototype for tracking chilled food shipments through Singapore's cold chain. It issues tamper-evident quality certificates at each custody step and acts as a neutral evidence layer: **it never moves money**.
+A prototype for tracking chilled food shipments, by air or sea, through Singapore's cold chain. Every party that holds a batch covers it with its own sensor and signs it in and out; the platform pins any problem to the stage and the firm where it happened, and issues a tamper-evident quality certificate. It's a neutral evidence layer: **it never moves money**.
 
-DBA5102 Blockchain course project. Original build brief: [docs/brief.md](docs/brief.md). Design decisions, including where the build departs from the brief: [docs/decisions.md](docs/decisions.md). Live demo run sheet: [docs/demo-script.md](docs/demo-script.md).
+DBA5102 Blockchain course project. Build brief (kept in step with the app): [docs/brief.md](docs/brief.md). Design decisions and every change from the brief: [docs/decisions.md](docs/decisions.md). Live demo run sheet: [docs/demo-script.md](docs/demo-script.md).
 
 ## Architecture
 
 ![ColdChainSG architecture](docs/architecture.jpg)
 
-How the diagram maps to the code:
+How the diagram maps to the code (the diagram predates the sensor gateway; it sits beside the other services):
 
 | In the diagram | In the repo |
 | --- | --- |
 | Web app | `frontend/` (React + Vite). Calls the services over REST. |
-| Chain client / MetaMask | The web app's `frontend/src/lib/chain.ts`. Participants sign their own custody, ruling, decision and acknowledgement transactions in MetaMask. |
-| Backend services | `services/identity-service`, `custody-service`, `certificate-service`, `oracle-service`. Each stores its off-chain data in its own Postgres schema. |
-| Shared auth and RPC module | `services/common/`: Sign-In with Ethereum sessions, role lookups and the connection to the chain node. It runs in the backend (off-chain) and is shared by all four services. |
+| Chain client / MetaMask | The web app's `frontend/src/lib/chain.ts`. Participants sign their own batch, container, sensor, handover, ruling, decision and acknowledgement transactions in MetaMask. |
+| Backend services | `services/identity-service`, `custody-service`, `sensor-gateway`, `oracle-service`, `certificate-service`. Each stores its off-chain data in its own Postgres schema. |
+| Shared auth and RPC module | `services/common/`: Sign-In with Ethereum sessions, role lookups and the connection to the chain node. It runs in the backend (off-chain) and is shared by all five services. |
 | Blockchain layer: Identity | `contracts/contracts/ParticipantRegistry.sol`: wallets, roles, system pause |
-| Blockchain layer: Custody | `contracts/contracts/ShipmentCustody.sol`: containers, batches, two-step handovers with signed quality checks, the split |
+| Blockchain layer: Custody | `contracts/contracts/ShipmentCustody.sol`: batches, containers, each stage's sensor, two-step handovers with both sides' signed checks and their times, sealing, unloading |
 | Blockchain layer: Certificates | `contracts/contracts/CertificateRegistry.sol`: stage flags, claims, QA rulings and decisions, certificates, acknowledgement |
-| Blockchain layer: Evidence | `contracts/contracts/SensorOracle.sol`: sensor registrations, sensor-log fingerprints and per-leg summaries |
+| Blockchain layer: Evidence | `contracts/contracts/SensorOracle.sol`: each stage's readings hash (committed by the sensor) and per-batch summaries |
 
-On-chain: wallets and roles, custody handovers and both parties' signed checks, sensor-log fingerprints and summaries, claims, rulings, decisions and certificates. Off-chain (Postgres): organisation details, shipment descriptions, spot readings, issue reports, notes and the raw sensor logs. Their fingerprints are recorded on-chain, so any edit is detectable.
+On-chain: wallets and roles; batches, containers, seal and container numbers; which sensor covered each stage; every handover's two signed checks and their timestamps; each stage's readings hash and per-batch summary; flags, claims, rulings, decisions and certificates. Off-chain (Postgres): organisation details, product and voyage details, spot readings, issue reports, notes and the sensor readings themselves. Their fingerprints are on-chain, so any later edit is detectable.
 
-## Build status
+## How a shipment moves
 
-| Slice | Status |
-| --- | --- |
-| 1. ParticipantRegistry + wallet login / onboarding | ✅ contract + Identity Service, tested |
-| 2. ShipmentCustody + handovers | ✅ contract + Custody Service, tested |
-| 3. SensorOracle + CSV replay | ✅ contract + Oracle Service + demo CSVs, tested |
-| 4. CertificateRegistry + certificate lifecycle | ✅ contract + Certificate Service, tested |
-| 5. Frontend dashboards | ✅ all roles + admin demo control, browser-tested |
-| 6. Landing page polish | ✅ animated hero, problem, how it works, impact (illustrative) |
+| Stage | Holder | Their sensor | Handover that closes it |
+| --- | --- | --- | --- |
+| 0 | **Supplier** | cold-room sensor | signs each batch off to Cargo, which signs it in **straight into its container** |
+| 1 | **Cargo** (air or sea) | the container's sensor | seals the container and signs it off to the handler |
+| 2 | **Destination Freight Handler** | the same container sensor, still reading | signs the container off to the cold store |
+| 3 | **Cold Store** | cold-room sensor | unloads the container, signs each batch off to a reefer truck |
+| 4 | **Reefer Truck** | truck sensor | delivers each batch to its buyer |
+
+- **The supplier creates batches** with their buyer, quality inspector, max temperature and grace period (fixed on-chain), and registers its cold-room sensor for them.
+- **Cargo opens a container** by air or sea. It can type the container's real ISO 6346 number (checked on-chain, check digit included) or leave it blank to have one generated. It registers the container's sensor, receives batches into it, and **seals it** after loading. The seal number is on-chain, fixed once the container leaves Cargo, and printed on the certificate.
+- **Registering a sensor** is a dropdown wherever a holder needs one: *Register your sensor for this supply* (a sensor id and its export), *Demo simulation: compliant sensor registration*, *Demo simulation: breached sensor registration*, or one you registered before. The **sensor gateway** gives each sensor its own device key. When a stage closes, the sensor commits the hash of its readings on-chain, and the oracle summarises them for each batch.
+- **Every handover is two signatures.** The sender signs it off (the **exit** time) with a probe temperature and condition; the receiver signs it in (the **entry** time) with what they found, *Accept* or *Accept with issues*. There's no rejection. The time between the two is the **handover gap**: on the dock, unrefrigerated, no sensor. It's shown amber.
+- **A stage is flagged, permanently,** if its sensor shows the batch above its limit for longer than the grace period, the receiver's probe is too warm, the handover gap is longer than the grace period, there's damage, a broken seal or a reported issue, or the sensor sent no readings for longer than the grace period. A claim opens straight away, often mid-journey, tagged to whoever held the batch.
+- **The buyer's quality inspector** rules on each flagged stage (upheld, overturned or compensation agreed), then signs a final **Release for sale** or **Reject**. The buyer then acknowledges receipt, which closes the batch.
+- **The certificate** is printable (A4, *Print / Save as PDF*) and carries a QR code to `/verify/<batchId>`: a public page that reads the certificate and every transaction behind it straight from the chain, no sign-in needed.
+- **The admin** only runs the platform: approves and suspends participants, can pause the system, and sees the overview and the audit log.
+- **Simulated sensors follow the shipment's spec:** a demo compliant sensor holds about 1.5 °C below the tightest limit of the batches it covers (a −10 °C batch sees about −11.5 °C); a demo breached one fails a minute after registration and climbs about 5.5 °C above the loosest limit. They read every 10 seconds.
+- **All times are real**: entry, exit, handover gaps, excursions and grace periods are real minutes. For a short live demo, give batches short grace periods (e.g. 2 minutes).
+
+See [docs/demo-script.md](docs/demo-script.md) for the 10-minute walkthrough and [docs/decisions.md](docs/decisions.md) for why things work this way.
 
 ## Prerequisites
 
@@ -50,9 +62,10 @@ npm run chain                   # terminal 1: local Hardhat node on :8545
 npm run deploy                  # terminal 2: deploy contracts (also resets local DB tables)
 npm start -w services/identity-service     # :4001  (one terminal each, or background them)
 npm start -w services/custody-service      # :4002
-npm start -w services/oracle-service       # :4003
-npm start -w services/certificate-service  # :4004  (also runs the certificate sync loop)
-npm run seed                    # onboard the demo organisations + sensors; prints MetaMask keys
+npm start -w services/oracle-service       # :4003  (summarises sensor readings)
+npm start -w services/certificate-service  # :4004  (runs the certificate sync loop)
+npm start -w services/sensor-gateway       # :4005  (sensor device keys; commits readings)
+npm run seed                    # onboard the nine demo organisations; prints MetaMask keys
 npm run web                     # frontend on http://localhost:5173
 ```
 
@@ -65,56 +78,39 @@ The chain resets every time `npm run chain` restarts. After a restart, re-run `n
 3. **After restarting the chain**, MetaMask still remembers old nonces. In MetaMask, go to *Settings → Advanced → Clear activity tab data* for each account, or transactions will fail with "nonce too high".
 4. Switching accounts in MetaMask signs you out of the app, so actions are never sent from the wrong wallet.
 
-### How a shipment moves
-
-- **Each container has an ISO 6346 number.** The supplier can type the real one (the contract checks its check digit and that it isn't on another active shipment) or leave it blank to have one generated on-chain (owner code `CCS`, which is reserved for generated numbers). Its batches carry it.
-- **The supplier records the seal number before dispatch.** It's stored on-chain, can't change once the carrier has the container, and is printed on the certificate. Later receivers tick *Seal intact* (the number is shown so they can compare).
-- **Every handover is a two-sided quality checkpoint.**
-  - The sender signs an outgoing check: dispatch temperature, minutes without refrigeration, condition and seal.
-  - The receiver inspects and signs an incoming check, choosing *Accept* or *Accept with issues*. There's no rejection.
-- **While holding a shipment,** custodians log spot temperatures and report issues. These are sealed into their signed check at handover.
-- **A failed check permanently flags that stage** and opens a claim straight away, often while the shipment is still moving. The reasons are: too warm on receipt, too long unrefrigerated, or damage, a broken seal or a reported issue.
-- **Each leg's custodian uploads their logger file at the handover that ends their leg** (in the handover form; the cold store does it when it splits). It's cross-checked against the sensor's own fingerprint, so edited logs are caught. In **Demo control**, the admin sets what each leg's sensor records (compliant or breach) before the leg ends, standing in for real hardware.
-- **The buyer's quality inspector:**
-  - rules on each flagged stage: upheld, overturned or compensation agreed
-  - after delivery, signs a final **Release for sale** or **Reject**
-
-  The buyer then acknowledges receipt, which closes the batch.
-- **Printable certificate:** once issued, the batch page's certificate card has a **Printable certificate** button. It opens an A4 document with the full record and its verification fingerprints. Use **Print / Save as PDF**.
-- **Public verification:** the printed certificate has a QR code. It opens `/verify/<batchId>`, which anyone can view without signing in. It reads the certificate and the batch's full transaction history (who signed each one, the call, its events) straight from the chain, and warns if the certificate was printed from a different chain or contract.
-
-See [docs/demo-script.md](docs/demo-script.md) for the 10-minute walkthrough and [docs/decisions.md](docs/decisions.md) for why things work this way.
-
 ## Tests
 
 ```bash
 npm run test:all
 ```
 
-This runs **every suite against an isolated stack**, so your demo data is never touched. The isolated stack is a second chain on :8546, a `coldchainsg_e2e` database, services on :4101–4104 and the web app on :5174. Only Postgres needs to be running.
+This runs **every suite against an isolated stack**, so your demo data is never touched. The isolated stack is a second chain on :8546, a `coldchainsg_e2e` database, services on :4101–4105 and the web app on :5174. Only Postgres needs to be running.
 
 | Suite | What it covers |
 | --- | --- |
-| browser | The whole demo through the UI in Chrome: onboarding, handover checks, issue reports, flags, the edited-log catch, QA rulings and decision, the printable certificate (saved as a PDF), and the public verification page opened from its QR code. Screenshots go to `frontend/e2e/screenshots/`. |
-| contracts | Solidity unit tests, including every state protection in the brief and every flag rule |
-| identity / custody / oracle / certificate | Each service end-to-end against the real chain and database |
+| browser | The whole demo through the UI in Chrome: onboarding; batches with a cold-room sensor; Cargo's container with its own sensor export; a sensor excursion, a warm receipt and a long dock time flagged for the 4 °C batch but not the 8 °C one; a demo "breached" truck sensor; QA rulings with on-chain verification of the readings; the printable certificate (saved as a PDF) and its public verification page. Screenshots go to `frontend/e2e/screenshots/`. |
+| contracts | Solidity unit tests: every state protection, every flag rule, entry/exit windows and handover gaps |
+| identity / custody / oracle / certificate | Each service end-to-end against the real chain and database (the oracle suite covers the sensor gateway's API, commits and tamper detection) |
+| gateway | The simulated sensors: compliant and breached readings, attached exports, deterministic hashes |
 
-`npm run test:contracts` runs just the Solidity tests (in-process; nothing needs to be running).
+`npm run test:contracts` runs just the Solidity tests (in-process; nothing needs to be running). `npm run slither` runs static analysis against `contracts/slither-baseline.txt`.
 
 ## Known limitations
 
 - **The local chain is in memory.** `npm run chain` runs Hardhat's development node, which keeps nothing on disk. Stopping it (or restarting the computer) erases every contract and record. After a restart, `npm run deploy` also resets the off-chain tables so they don't point at shipments that no longer exist, and the demo has to be seeded again.
-- **Sensors are simulated.** There's no IoT hardware. In Demo control the admin decides what each leg's sensor "records" (compliant or breach), and custodians pick from demo CSV files or upload their own.
+- **Sensors are simulated.** There's no IoT hardware. A demo sensor's readings are generated from the covered batches' limits (compliant, or failing a minute after registration); an "own" sensor's attached export is replayed minute by minute as its live feed. The gateway holds every device key, as a vendor's platform would; real devices would sign on the device.
+- **Entry and exit are the signature times.** A handover's timestamps are when each party signed, not when the goods physically moved.
 - **Demo wallets use Hardhat's public test keys.** They're fine on the local chain and must never be used on a real network.
 
 ## Layout
 
 ```
-contracts/          Solidity + Hardhat 3 (tests in contracts/test)
-services/common/    shared env, db, chain, auth (SIWE session JWT), http helpers
-services/*-service/ one Express API per service, each with its own Postgres schema
-frontend/           React + Vite + Tailwind; e2e/ holds the browser test
-data/raw/           demo sensor CSVs: compliant, breached, tampered (regenerate: npx tsx data/generate.ts)
-deployments/        contract addresses + ABIs written by the deploy script
-docs/               build brief, design decisions, demo run sheet, architecture diagram
+contracts/              Solidity + Hardhat 3 (tests in contracts/test)
+services/common/        shared env, db, chain, auth (SIWE session JWT), http and test helpers
+services/*-service/     one Express API per service, each with its own Postgres schema
+services/sensor-gateway the simulated sensor platform: device keys, readings, on-chain commits
+frontend/               React + Vite + Tailwind; e2e/ holds the browser test
+data/raw/               sample sensor exports to attach as "your sensor" (regenerate: npx tsx data/generate.ts)
+deployments/            contract addresses + ABIs written by the deploy script
+docs/                   build brief, design decisions, demo run sheet, architecture diagram
 ```

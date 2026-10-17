@@ -9,19 +9,21 @@ import {ShipmentCustody} from "./ShipmentCustody.sol";
 /// @notice Quality outcomes for each batch. Records evidence and decisions only:
 ///         it never moves money. Disputes are settled between the firms, off-platform.
 ///
-/// A batch passes through five stages, each closed by a two-sided handover checkpoint:
-///   0 Origin (supplier's dispatch) · 1 Air carrier · 2 Changi handler · 3 Cold store · 4 Delivery truck
-/// Legs 1-4 also carry an independent sensor log (SensorOracle).
+/// A batch passes through five stages, each held by one party with its own sensor and closed by a
+/// two-sided handover check:
+///   0 Supplier · 1 Cargo · 2 Destination freight handler · 3 Cold store · 4 Reefer truck
 ///
 /// A stage is flagged, permanently, when any of these hold (checked against the batch's own limits):
-///   FLAG_SENSOR          the verified sensor log shows an excursion longer than the grace period
-///   FLAG_RECEIPT_TEMP    the receiver's probe temperature is above the batch's limit
-///   FLAG_UNREFRIGERATED  minutes without refrigeration (sender's + at the handover) exceed the grace period
+///   FLAG_SENSOR          the stage's verified sensor readings stay above the limit longer than the grace period
+///   FLAG_RECEIPT_TEMP    the receiver's probe temperature at the closing handover is above the limit
+///   FLAG_HANDOVER_GAP    the closing handover's time on the dock (sender's sign-off to receiver's
+///                        sign-in, unrefrigerated and unmonitored) is longer than the grace period
 ///   FLAG_CONDITION       damaged packaging, a broken seal, "accepted with issues", or issues the sender reported
+///   FLAG_MISSING_DATA    the sensor has no readings for longer than the grace period
 ///
 /// Lifecycle (certifier = the Certificate Service; QA = the batch's assigned inspector):
 ///   openClaim          certifier, as soon as a stage is flagged (often while the batch is in transit)
-///   issueLegPass       certifier, once a stage's checkpoint (and, for legs 1-4, sensor log) are in
+///   issueLegPass       certifier, once a stage's closing handover and verified sensor readings are in
 ///   issueFinalCertificate  certifier, once all five stages have a LegPass
 ///   submitResolution   QA rules on each flagged stage: upheld / overturned / compensation agreed
 ///   submitDisposition  QA's final decision on the batch: release for sale or reject
@@ -53,8 +55,9 @@ contract CertificateRegistry {
 
     uint8 public constant FLAG_SENSOR = 1;
     uint8 public constant FLAG_RECEIPT_TEMP = 2;
-    uint8 public constant FLAG_UNREFRIGERATED = 4;
+    uint8 public constant FLAG_HANDOVER_GAP = 4;
     uint8 public constant FLAG_CONDITION = 8;
+    uint8 public constant FLAG_MISSING_DATA = 16;
 
     uint8 public constant LAST_STAGE = 4; // stages 0..4
     uint256 public constant MAX_NOTE_BYTES = 1000;
@@ -67,10 +70,11 @@ contract CertificateRegistry {
         uint8 flags;
         PassStatus status;
         int16 receiptTenthsC; // receiver's probe temperature at the closing handover
-        uint32 unrefrigeratedMinutes;
-        bytes32 fileHash; // sensor log (0 for stage 0)
-        int16 maxTenthsC; // sensor peak (0 for stage 0)
-        uint32 breachMinutes; // sensor excursion (0 for stage 0)
+        uint32 gapMinutes; // time on the dock at the closing handover, unrefrigerated
+        bytes32 fileHash; // the stage's sensor readings
+        int16 maxTenthsC; // sensor peak
+        uint32 breachMinutes; // longest sensor excursion above the limit
+        uint32 missingMinutes; // minutes with no sensor readings
         uint64 issuedAt;
     }
 
@@ -157,23 +161,20 @@ contract CertificateRegistry {
 
     // ---- Evaluating a stage -----------------------------------------------------------
 
-    /// @notice The checkpoint that closed `leg` for this batch (stages 0-2 live on the container).
+    /// @notice The handover that closed `leg` for this batch (stages 1-2 live on its container).
     function checkpointFor(uint256 batchId, uint8 leg) public view returns (ShipmentCustody.Checkpoint memory) {
-        ShipmentCustody.Unit memory batch = custody.getUnit(batchId);
-        return custody.getCheckpoint(leg <= 2 ? batch.containerId : batchId, leg);
+        return custody.getCheckpoint(custody.recordedOn(batchId, leg), leg);
     }
 
-    /// @notice Who held the batch during a stage: the supplier at origin, else the leg's custodian.
-    function custodianOf(uint256 batchId, uint8 leg) public view returns (address) {
-        if (leg == 0) return custody.getUnit(batchId).supplier;
-        (address custodian,,,,) = custody.legWindow(batchId, leg);
-        return custodian;
+    /// @notice Who held the batch during a stage.
+    function custodianOf(uint256 batchId, uint8 leg) public view returns (address custodian) {
+        (custodian,,,) = custody.stageWindow(batchId, leg);
     }
 
     /// @notice Live flags for a stage, from whatever evidence exists so far.
     /// @return flags bitmask of FLAG_* reasons
     /// @return checkpointDone the handover closing this stage has been accepted
-    /// @return sensorDone stage 0 has no sensor; legs 1-4 need a Verified sensor log
+    /// @return sensorDone the stage's sensor readings are Verified
     function stageFlags(uint256 batchId, uint8 leg)
         public
         view
@@ -187,21 +188,16 @@ contract CertificateRegistry {
         checkpointDone = cp.incoming.checkedAt != 0;
         if (checkpointDone) {
             if (cp.incoming.tempTenthsC > batch.thresholdTenthsC) flags |= FLAG_RECEIPT_TEMP;
-            if (cp.outgoing.unrefrigeratedMinutes + cp.incoming.unrefrigeratedMinutes > batch.graceMinutes) {
-                flags |= FLAG_UNREFRIGERATED;
-            }
+            if (custody.handoverGapMinutes(batchId, leg) > batch.graceMinutes) flags |= FLAG_HANDOVER_GAP;
             if (cp.incoming.damaged || !cp.incoming.sealIntact || cp.incoming.issues || cp.outgoing.issues) {
                 flags |= FLAG_CONDITION;
             }
         }
 
-        if (leg == 0) {
-            sensorDone = true;
-        } else {
-            SensorOracle.LegSummary memory s = sensorOracle.getSummary(batchId, leg);
-            sensorDone = s.status == SensorOracle.Status.Verified;
-            if (sensorDone && s.breachMinutes > batch.graceMinutes) flags |= FLAG_SENSOR;
-        }
+        SensorOracle.LegSummary memory s = sensorOracle.getSummary(batchId, leg);
+        sensorDone = s.status == SensorOracle.Status.Verified;
+        if (sensorDone && s.breachMinutes > batch.graceMinutes) flags |= FLAG_SENSOR;
+        if (sensorDone && s.missingMinutes > batch.graceMinutes) flags |= FLAG_MISSING_DATA;
     }
 
     // ---- Claims (opened as soon as a stage is flagged) ------------------------------------
@@ -216,10 +212,8 @@ contract CertificateRegistry {
         c.leg = leg;
         c.provisionalCustodian = custodianOf(batchId, leg);
         c.openedAt = uint64(block.timestamp);
-        if (leg > 0) {
-            SensorOracle.LegSummary memory s = sensorOracle.getSummary(batchId, leg);
-            if (s.status == SensorOracle.Status.Verified) (c.breachStart, c.breachEnd) = (s.breachStart, s.breachEnd);
-        }
+        SensorOracle.LegSummary memory s = sensorOracle.getSummary(batchId, leg);
+        if (s.status == SensorOracle.Status.Verified) (c.breachStart, c.breachEnd) = (s.breachStart, s.breachEnd);
         claimOf[batchId][leg] = id;
         claimsOfBatch[batchId].push(id);
         openClaimCount[batchId]++;
@@ -243,11 +237,9 @@ contract CertificateRegistry {
         lp.flags = flags;
         lp.status = flags == 0 ? PassStatus.Pass : PassStatus.Flagged;
         lp.receiptTenthsC = cp.incoming.tempTenthsC;
-        lp.unrefrigeratedMinutes = cp.outgoing.unrefrigeratedMinutes + cp.incoming.unrefrigeratedMinutes;
-        if (leg > 0) {
-            SensorOracle.LegSummary memory s = sensorOracle.getSummary(batchId, leg);
-            (lp.fileHash, lp.maxTenthsC, lp.breachMinutes) = (s.fileHash, s.maxTenthsC, s.breachMinutes);
-        }
+        lp.gapMinutes = uint32(custody.handoverGapMinutes(batchId, leg));
+        SensorOracle.LegSummary memory s = sensorOracle.getSummary(batchId, leg);
+        (lp.fileHash, lp.maxTenthsC, lp.breachMinutes, lp.missingMinutes) = (s.fileHash, s.maxTenthsC, s.breachMinutes, s.missingMinutes);
         lp.issuedAt = uint64(block.timestamp);
         legPassOf[batchId][leg] = id;
         emit LegPassIssued(id, batchId, leg, lp.status, flags);

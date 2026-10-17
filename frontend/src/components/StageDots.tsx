@@ -1,4 +1,4 @@
-// Five dots, one per stage (origin + 4 legs): green passed, red flagged, grey not checked yet.
+// Five dots, one per stage (supplier, Cargo, handler, cold store, truck): green passed, red flagged, grey not checked yet.
 import { HANDOVER_NAMES, REASON_LABELS } from "../lib/format";
 import type { StageStatus } from "../lib/types";
 

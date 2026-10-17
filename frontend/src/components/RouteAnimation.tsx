@@ -1,5 +1,5 @@
-// Landing-page hero: a container travels the six custody stops. Each handover seals that leg's
-// sensor evidence, the container splits into batches at the cold store, and the run ends in a
+// Landing-page hero: a shipment travels the six custody stops. Each handover seals that stage's
+// sensor evidence, the container is unloaded into batches at the cold store, and the run ends in a
 // clean certificate. Respects prefers-reduced-motion by showing the finished state.
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { BadgeCheck, Boxes, Container, Factory, Forklift, Lock, Package, Refrigerator, Store, Truck } from "lucide-react";
@@ -41,7 +41,7 @@ export function RouteAnimation() {
     <div
       className="relative rounded-3xl border border-line bg-white px-4 pb-8 pt-20 shadow-sm sm:px-12"
       role="img"
-      aria-label="A container moves from supplier to cargo carrier, destination freight handler, cold store, reefer truck and buyer. Each handover seals that leg's temperature evidence, and the journey ends with a clean quality certificate."
+      aria-label="A container moves from supplier to cargo carrier, destination freight handler, cold store, reefer truck and buyer. Each handover seals that stage's temperature evidence, and the journey ends with a clean quality certificate."
     >
       <div className="relative mx-3 sm:mx-8">
         {/* The travelling shipment, with its live temperature reading */}
@@ -112,8 +112,8 @@ export function RouteAnimation() {
                 <span className="mt-2 h-6 w-14 text-center text-[10px] font-medium leading-tight sm:h-auto sm:w-24 sm:text-xs">{label}</span>
                 <span className="mt-1 h-4">
                   <AnimatePresence>
-                    {/* Legs 1-4 carry sensor evidence: the supplier and buyer ends do not. */}
-                    {sealed && i > 0 && i < LAST && (
+                    {/* Every holder's stage carries its own sensor's evidence; the buyer is the end. */}
+                    {sealed && i < LAST && (
                       <motion.span
                         className="inline-flex items-center gap-0.5 rounded-full bg-pass-soft px-1.5 py-px text-[10px] font-semibold text-pass"
                         initial={{ opacity: 0, y: -4 }}
@@ -146,7 +146,7 @@ export function RouteAnimation() {
               <BadgeCheck className="size-7 text-pass" aria-hidden />
               <div className="leading-tight">
                 <div className="text-sm font-semibold text-pass">Quality certificate: Clean</div>
-                <div className="text-xs text-pass/80">4 of 4 legs within 4 °C · evidence hash-verified</div>
+                <div className="text-xs text-pass/80">5 of 5 stages within 4 °C · evidence hash-verified</div>
               </div>
             </motion.div>
           )}

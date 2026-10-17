@@ -15,7 +15,7 @@ export function QualityLog({ unitId, limitC }: { unitId: number; limitC?: number
   return (
     <div className="rounded-xl bg-canvas p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-sm font-medium">Your quality log for this leg</span>
+        <span className="text-sm font-medium">Your quality log while you hold it</span>
         <div className="flex gap-2">
           <Button variant="secondary" className="px-3 py-1.5" onClick={() => setMode(mode === "reading" ? null : "reading")}>
             <Thermometer className="size-4" aria-hidden /> Log temperature

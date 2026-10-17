@@ -62,13 +62,12 @@ export const adminToken = () => signIn(new Wallet(env.ADMIN_PRIVATE_KEY!));
 /** createContainer's container-number argument when the contract should generate one. */
 export const AUTO_NUMBER = "0x" + "00".repeat(11);
 
-/** The seal number the supplier records before dispatch (required by initiateTransfer at origin). */
+/** The seal number Cargo records after loading (required before the container is dispatched). */
 export const SEAL = encodeBytes32String("SGB4471203");
 
-/** A passing handover quality check: 3.0 °C, nothing unrefrigerated, sealed, no issues. */
+/** A passing handover quality check: 3.0 °C probe, no damage, sealed, no issues. */
 export const OK_CHECK = {
   tempTenthsC: 30,
-  unrefrigeratedMinutes: 0,
   damaged: false,
   sealIntact: true,
   issues: false,

@@ -1,57 +1,56 @@
-// End-to-end certificate lifecycle. Needs the chain, a deployment, and all four services running.
+// End-to-end certificate lifecycle. Needs the chain, a deployment, and all five services running.
 //
-// One container, two batches, same journey:
-//   salmon (limit 4 °C)  stage 1: handler measures 7.1 °C on receipt  → flagged in transit, QA rules immediately
-//                        stage 2: sensor log shows a 34-min breach    → flagged
-//                        stage 3: cold store reports packaging damage → flagged; QA finally REJECTS the batch
-//   cheese (limit 8 °C)  the same temperatures never exceed 8 °C      → clean; QA RELEASES it
+// Two batches from one supplier, one container, the same journey:
+//   salmon (4 °C, 15 min grace)  stage 1: the handler measures 7.1 °C on receipt  → flagged in transit, QA rules at once
+//                                stage 2: 20 minutes on the dock before the cold store signs in → flagged
+//                                stage 3: the truck finds the salmon's packaging damaged       → flagged; QA REJECTS the batch
+//   cheese (8 °C, 30 min grace)  the same temperatures and dock time are within its limits    → clean; QA RELEASES it
+// Every party uses a demo sensor that reads compliant, so these flags come from the handover checks.
 import assert from "node:assert/strict";
 import { before, test } from "node:test";
 import { AUTO_NUMBER, OK_CHECK, SEAL, adminToken, api, deployed, persona, provider } from "@coldchainsg/common/testing";
 import { encodeBytes32String } from "ethers";
 
 const certApi = api(`http://localhost:${process.env.CERTIFICATE_PORT ?? 4004}`);
-const oracleApi = api(`http://localhost:${process.env.ORACLE_PORT ?? 4003}`);
-const run = Math.random().toString(36).slice(2, 7).toUpperCase();
+const gatewayApi = api(`http://localhost:${process.env.GATEWAY_PORT ?? 4005}`);
 
 let p: Record<string, Awaited<ReturnType<typeof persona>>>;
 let admin: string;
-let containerId: number;
+let container: number;
 let salmon: number;
 let cheese: number;
 
 const as = (who: string, name = "ShipmentCustody") => deployed(name, p[who].signer);
 const send = async (who: string, fn: string, ...args: unknown[]) => (await as(who)[fn](...args)).wait();
-const sendCert = async (who: string, fn: string, ...args: unknown[]) =>
-  (await as(who, "CertificateRegistry")[fn](...args)).wait();
-const setRecording = async (shipmentId: number, leg: number, recording: string) => {
-  const res = await oracleApi(`/legs/${shipmentId}/${leg}/recording`, { method: "PUT", token: admin, body: { recording } });
-  assert.equal(res.status, 200, JSON.stringify(res.body));
-};
-/**
- * The custodian who held the leg uploads a logger file after the handover, once the sensor has
- * committed, so it's checked immediately. (Uploading at handover, before the sensor reports, is
- * covered by the oracle and browser tests.)
- */
-const upload = async (who: string, shipmentId: number, leg: number, demoFile: string) => {
-  const oracle = deployed("SensorOracle", provider);
-  for (let i = 0; i < 40 && (await oracle.committedHash(shipmentId, leg)) === "0x" + "0".repeat(64); i++) {
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  const res = await oracleApi(`/legs/${shipmentId}/${leg}/upload`, { token: p[who].token, body: { demoFile } });
-  assert.equal(res.status, 201, JSON.stringify(res.body));
-  return res.body;
-};
+const sendCert = async (who: string, fn: string, ...args: unknown[]) => (await as(who, "CertificateRegistry")[fn](...args)).wait();
 const Disposition = { Released: 1, Rejected: 2 };
 const Outcome = { Upheld: 0, Overturned: 1, CompensationAgreed: 2 };
-/** One handover: sender signs an outgoing check, receiver an incoming one. */
-const handover = async (unit: number, from: string, to: string, out: Partial<typeof OK_CHECK> = {}, inc: Partial<typeof OK_CHECK> = {}) => {
-  await send(from, "initiateTransfer", unit, p[to].address, { ...OK_CHECK, ...out });
-  await send(to, "acceptTransfer", unit, { ...OK_CHECK, ...inc });
-};
 const sync = async () => assert.equal((await certApi("/sync", { token: admin, body: {} })).status, 200);
-const certificate = async (batchId: number, who = "inspector") =>
-  (await certApi(`/certificates/${batchId}`, { token: p[who].token })).body;
+const certificate = async (batchId: number, who = "inspector") => (await certApi(`/certificates/${batchId}`, { token: p[who].token })).body;
+
+/** A demo sensor that reads compliant, registered with the gateway and then on-chain. */
+async function demoSensor(who: string, ids: number[]) {
+  const res = await gatewayApi("/sensors", { token: p[who].token, body: { mode: "compliant" } });
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  await send(who, "registerSensor", ids, encodeBytes32String(res.body.sensorId), res.body.device);
+}
+
+/** Moves the test chain's clock on, instead of waiting. */
+const travel = async (seconds: number) => {
+  const latest = (await provider.getBlock("latest"))!.timestamp;
+  await provider.send("evm_setNextBlockTimestamp", [latest + seconds]);
+  await provider.send("evm_mine", []);
+};
+
+/** Waits for the sensors and oracle to report, then for the certificate service to act. */
+async function waitFor(check: () => Promise<boolean>, what: string) {
+  for (let i = 0; i < 80; i++) {
+    await sync();
+    if (await check()) return;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
 
 before(async () => {
   p = {};
@@ -64,141 +63,127 @@ before(async () => {
     ["salmonBuyer", "BUYER"],
     ["cheeseBuyer", "BUYER"],
     ["inspector", "INSPECTOR"],
-    ["otherInspector", "INSPECTOR"],
+    ["stranger", "BUYER"],
   ] as const) {
     p[name] = await persona(role);
   }
   admin = await adminToken();
-  for (const id of ["CTR", "SAL", "CHE"]) {
-    const res = await oracleApi("/sensors", { token: admin, body: { sensorId: `${id}-${run}`, label: id } });
-    assert.equal(res.status, 201, JSON.stringify(res.body));
-  }
 });
 
-test("dispatch and stage 1: the handler finds the container warm on receipt", async () => {
-  containerId = Number(await deployed("ShipmentCustody", provider).nextId());
-  salmon = containerId + 1;
-  cheese = containerId + 2;
-  await send("supplier", "createContainer", encodeBytes32String(`CTR-${run}`), AUTO_NUMBER);
-  await send("supplier", "addBatch", containerId, p.salmonBuyer.address, p.inspector.address, 40, 15, encodeBytes32String(`SAL-${run}`));
-  await send("supplier", "addBatch", containerId, p.cheeseBuyer.address, p.inspector.address, 80, 15, encodeBytes32String(`CHE-${run}`));
-  await setRecording(containerId, 2, "breach"); // the sensor will record a cooling failure on leg 2
-
-  await send("supplier", "recordSeal", containerId, SEAL);
-  await handover(containerId, "supplier", "carrier"); // stage 0: clean dispatch
-  await handover(containerId, "carrier", "handler", { tempTenthsC: 34 }, { tempTenthsC: 71, issues: true }); // stage 1
+test("stage 1: the handler finds the container warm on receipt", async () => {
+  salmon = Number(await deployed("ShipmentCustody", provider).nextId());
+  cheese = salmon + 1;
+  container = salmon + 2;
+  await send("supplier", "createBatch", p.salmonBuyer.address, p.inspector.address, 40, 15);
+  await send("supplier", "createBatch", p.cheeseBuyer.address, p.inspector.address, 80, 30);
+  await demoSensor("supplier", [salmon, cheese]);
+  await send("carrier", "createContainer", AUTO_NUMBER);
+  await demoSensor("carrier", [container]);
+  for (const b of [salmon, cheese]) {
+    await send("supplier", "initiateTransfer", b, p.carrier.address, OK_CHECK);
+    await send("carrier", "acceptIntoContainer", b, container, OK_CHECK);
+  }
+  await send("carrier", "recordSeal", container, SEAL);
+  await send("carrier", "initiateTransfer", container, p.handler.address, { ...OK_CHECK, tempTenthsC: 34 });
+  await send("handler", "acceptTransfer", container, { ...OK_CHECK, tempTenthsC: 71, issues: true });
   await sync();
 });
 
 test("a failed handover opens a claim at once, while the batch is still in transit", async () => {
+  await waitFor(async () => (await certificate(salmon)).claims.length === 1, "the salmon's stage 1 claim");
   const s = await certificate(salmon);
   assert.deepEqual(
     s.claims.map((c: any) => [c.leg, c.provisionalCustodian, c.reasons]),
     [[1, p.carrier.address, ["receipt_temp", "condition"]]],
   );
-  assert.deepEqual(s.stages[1].reasons, ["receipt_temp", "condition"]);
-  assert.equal(s.certificate, null, "no certificate yet: the batch is still at the airport");
-
-  // Cheese's limit is 8 °C, so 7.1 °C on receipt isn't a temperature flag, but "accepted with issues" still is.
+  assert.equal(s.certificate, null, "no certificate yet: the batch is still with the handler");
+  // "Accepted with issues" flags the cheese's stage 1 too; 7.1 °C is within its 8 °C limit.
   assert.deepEqual((await certificate(cheese)).stages[1].reasons, ["condition"]);
 
-  // The carrier sees the claim against them.
-  const theirs = await certApi("/claims?status=open", { token: p.carrier.token });
-  assert.ok(theirs.body.some((c: any) => c.batchId === salmon && c.leg === 1));
-
-  // QA rules on it now, mid-transit.
-  const [claim] = s.claims;
-  await assert.rejects(sendCert("otherInspector", "submitResolution", claim.id, Outcome.Upheld, "x"), /not the assigned inspector/);
-  await sendCert("inspector", "submitResolution", claim.id, Outcome.Upheld, "Carrier's reefer tripped; their own issue report confirms 25 min unrefrigerated.");
+  // QA rules while the batch is still in transit.
+  const claimId = s.claims[0].id;
+  await sendCert("inspector", "submitResolution", claimId, Outcome.Upheld, "Cargo's reefer reading confirms the warm hold");
   assert.equal((await certificate(salmon)).claims[0].status, "resolved");
 });
 
-test("the rest of the journey: sensor breach on leg 2, damage reported at the cold store, an edited log caught", async () => {
-  await handover(containerId, "handler", "coldStore"); // stage 2 checks pass; the sensor will disagree
-  await send("coldStore", "splitContainer", containerId);
-  await handover(salmon, "coldStore", "truck", { issues: true }); // stage 3: cold store reported damage
-  await handover(cheese, "coldStore", "truck");
-  await handover(salmon, "truck", "salmonBuyer");
-  await handover(cheese, "truck", "cheeseBuyer");
+test("stage 2: 20 minutes on the dock before the cold store signs in; stage 3: the truck finds damage", async () => {
+  await send("handler", "initiateTransfer", container, p.coldStore.address, OK_CHECK);
+  await travel(20 * 60); // 20 minutes on the dock
+  await send("coldStore", "acceptTransfer", container, OK_CHECK);
+  await demoSensor("coldStore", [salmon, cheese]);
+  await send("coldStore", "unloadContainer", container);
+  for (const b of [salmon, cheese]) {
+    await send("coldStore", "initiateTransfer", b, p.truck.address, OK_CHECK);
+    await send("truck", "acceptTransfer", b, { ...OK_CHECK, damaged: b === salmon });
+  }
+  await demoSensor("truck", [salmon, cheese]);
+  for (const [b, buyer] of [
+    [salmon, "salmonBuyer"],
+    [cheese, "cheeseBuyer"],
+  ] as const) {
+    await send("truck", "initiateTransfer", b, p[buyer].address, OK_CHECK);
+    await send(buyer, "acceptTransfer", b, OK_CHECK);
+  }
 
-  await upload("carrier", containerId, 1, "compliant");
-  await upload("handler", containerId, 2, "breached");
-  const edited = await upload("coldStore", containerId, 3, "tampered");
-  assert.equal(edited.matches, false, "an edited log doesn't match the sensor's record");
-  await upload("coldStore", containerId, 3, "compliant");
-  await upload("truck", salmon, 4, "compliant");
-  await upload("truck", cheese, 4, "compliant");
-  await sync();
-
+  await waitFor(async () => (await certificate(salmon)).certificate !== null && (await certificate(cheese)).certificate !== null, "both certificates");
   const s = await certificate(salmon);
-  assert.equal(s.certificate.status, "flagged");
-  assert.deepEqual(
-    s.stages.map((st: any) => st.reasons),
-    [[], ["receipt_temp", "condition"], ["sensor_excursion"], ["condition"], []],
-  );
-  // Claims are in the order they opened: stage 3's damage was flagged at the handover, before stage 2's
-  // sensor breach (which waited for the log upload). Compare by stage.
-  assert.deepEqual(
-    [...s.claims].sort((a: any, b: any) => a.leg - b.leg).map((c: any) => [c.leg, c.provisionalCustodian, c.status]),
-    [
-      [1, p.carrier.address, "resolved"],
-      [2, p.handler.address, "open"],
-      [3, p.coldStore.address, "open"],
-    ],
-  );
+  assert.deepEqual(s.stages[2].reasons, ["handover_gap"]);
+  assert.deepEqual(s.stages[3].reasons, ["condition"]);
+  const gap = s.legPasses.find((lp: any) => lp.leg === 2).gapMinutes;
+  assert.ok(gap >= 20 && gap <= 22, `gap was ${gap} min`);
+  assert.equal(s.certificate.status, "flagged", "two stages still await QA");
+  assert.deepEqual(s.claims.map((c: any) => [c.leg, c.provisionalCustodian]).sort(), [
+    [1, p.carrier.address],
+    [2, p.handler.address],
+    [3, p.coldStore.address],
+  ]);
+
   const c = await certificate(cheese);
-  assert.equal(c.claims.length, 1, "cheese: only the 'accepted with issues' flag at stage 1");
+  assert.deepEqual(c.stages[2].reasons, [], "20 minutes is inside the cheese's 30-minute grace period");
+  assert.equal(c.certificate.status, "flagged", "its stage 1 condition flag still awaits QA");
 });
 
 test("QA can't decide the batch until every flagged stage is ruled on; the buyer can't close it before QA decides", async () => {
-  await assert.rejects(sendCert("salmonBuyer", "acknowledgeReceipt", salmon), /awaiting QA decision/);
-  await assert.rejects(sendCert("inspector", "submitDisposition", salmon, Disposition.Rejected, "x"), /rule on every flagged stage first/);
-
-  const claims = (await certificate(salmon)).claims;
-  const leg2 = claims.find((c: any) => c.leg === 2);
-  const leg3 = claims.find((c: any) => c.leg === 3);
-  const note = await certApi(`/claims/${leg2.id}/notes`, { token: p.inspector.token, body: { body: "Handler's log agrees with the sensor." } });
-  assert.equal(note.status, 201);
-  await sendCert("inspector", "submitResolution", leg2.id, Outcome.CompensationAgreed, "Handler agreed a 10% credit, settled off-platform.");
-  await sendCert("inspector", "submitResolution", leg3.id, Outcome.Upheld, "Crushed cartons photographed at pickup.");
+  await assert.rejects(sendCert("inspector", "submitDisposition", salmon, Disposition.Rejected, "too early"), /rule on every flagged stage first/);
+  for (const claim of (await certificate(salmon)).claims.filter((c: any) => c.status === "open")) {
+    await sendCert("inspector", "submitResolution", claim.id, Outcome.Upheld, `Stage ${claim.leg}: custodian responsible`);
+  }
   assert.equal((await certificate(salmon)).certificate.status, "resolved");
+  await assert.rejects(sendCert("salmonBuyer", "acknowledgeReceipt", salmon), /awaiting QA decision/);
 });
 
 test("QA rejects the salmon and releases the cheese; each buyer closes their batch", async () => {
-  await sendCert("inspector", "submitDisposition", salmon, Disposition.Rejected, "Core temperature exceeded 4 °C on two stages; not fit for sale.");
-  const [cheeseClaim] = (await certificate(cheese)).claims;
-  await sendCert("inspector", "submitResolution", cheeseClaim.id, Outcome.Overturned, "Below the 8 °C limit throughout.");
-  await sendCert("inspector", "submitDisposition", cheese, Disposition.Released, "Within limits at every stage.");
-
-  await assert.rejects(sendCert("cheeseBuyer", "acknowledgeReceipt", salmon), /not the batch's buyer/);
+  await sendCert("inspector", "submitDisposition", salmon, Disposition.Rejected, "Warm at Changi, 20 min on the dock, damaged at pickup");
   await sendCert("salmonBuyer", "acknowledgeReceipt", salmon);
+  const cheeseClaim = (await certificate(cheese)).claims[0];
+  await sendCert("inspector", "submitResolution", cheeseClaim.id, Outcome.Overturned, "Issue was the salmon's carton only");
+  await sendCert("inspector", "submitDisposition", cheese, Disposition.Released, "Within limits throughout");
   await sendCert("cheeseBuyer", "acknowledgeReceipt", cheese);
 
-  const s = await certificate(salmon, "salmonBuyer");
+  const s = await certificate(salmon);
   assert.equal(s.decision.disposition, "rejected");
   assert.equal(s.acknowledgement.buyer, p.salmonBuyer.address);
-  assert.equal((await certificate(cheese, "cheeseBuyer")).decision.disposition, "released");
+  assert.equal((await certificate(cheese)).decision.disposition, "released");
 });
 
 test("buyers only see their own certificates", async () => {
-  const mine = await certApi("/certificates", { token: p.cheeseBuyer.token });
-  assert.deepEqual(
-    mine.body.map((b: any) => b.batchId),
-    [cheese],
-  );
+  const ids = async (who: string) => (await certApi("/certificates", { token: p[who].token })).body.map((c: any) => c.batchId);
+  assert.deepEqual(await ids("salmonBuyer"), [salmon]);
+  assert.deepEqual(await ids("cheeseBuyer"), [cheese]);
+  assert.deepEqual(await ids("stranger"), []);
+  assert.deepEqual((await ids("truck")).sort(), [salmon, cheese].sort(), "the truck sees what it carried");
 });
 
-test("KPIs and the audit log reflect the checkpoints and QA decisions", async () => {
-  const kpis = await certApi("/kpis", { token: admin });
-  assert.ok(kpis.body.dispositions.released >= 1 && kpis.body.dispositions.rejected >= 1);
-  assert.ok(kpis.body.flagReasons.receipt_temp >= 1 && kpis.body.flagReasons.condition >= 1 && kpis.body.flagReasons.sensor_excursion >= 1);
-  assert.ok(kpis.body.checkpoints.completed >= 10);
-  assert.equal(kpis.body.claimsByLeg.length, 5);
+test("KPIs and the audit log reflect the handovers and QA decisions", async () => {
+  const kpis = (await certApi("/kpis", { token: admin })).body;
+  assert.ok(kpis.flagReasons.handover_gap >= 1);
+  assert.ok(kpis.gapMinutesByStage.find((g: any) => g.leg === 2).minutes >= 20);
+  assert.ok(kpis.dispositions.rejected >= 1 && kpis.dispositions.released >= 1);
 
-  const audit = await certApi("/audit?limit=500", { token: admin });
-  const events = new Set(audit.body.map((e: any) => e.event));
-  for (const name of ["CheckpointRecorded", "ClaimOpened", "LegPassIssued", "EvidenceMismatch", "ResolutionSubmitted", "FinalCertificateIssued", "DispositionSubmitted", "ReceiptAcknowledged"]) {
-    assert.ok(events.has(name), `audit log has ${name}`);
+  const audit = (await certApi("/audit?limit=500", { token: admin })).body;
+  const names = new Set(audit.map((e: any) => e.event));
+  for (const e of ["BatchCreated", "SensorRegistered", "BatchLoaded", "FileHashCommitted", "LegSummarySubmitted", "DispositionSubmitted"]) {
+    assert.ok(names.has(e), `audit has ${e}`);
   }
   assert.equal((await certApi("/audit", { token: p.inspector.token })).status, 403);
 });

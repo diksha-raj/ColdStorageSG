@@ -15,13 +15,13 @@ const STEPS = [
   },
   {
     Icon: Repeat2,
-    title: "Check at every handover",
-    body: "The sender records the temperature, time out of refrigeration and condition before handing over; the receiver inspects on arrival. Both sign, so a problem is pinned to the stage where it happened.",
+    title: "Sign off, sign in",
+    body: "The sender signs the goods off with a probe temperature and their condition; the receiver signs them in with what they found. Both signatures are timestamped, so time on the dock is measured, not guessed.",
   },
   {
     Icon: Fingerprint,
-    title: "Cross-check with the sensor",
-    body: "Each leg's logger file is fingerprinted (SHA-256) by the sensor itself. A log edited before upload no longer matches, and it's caught automatically.",
+    title: "Every holder's own sensor",
+    body: "Supplier, Cargo, cold store and truck each register their own sensor. It fingerprints (SHA-256) its readings on-chain the moment each stage closes, so readings edited later no longer match.",
   },
   {
     Icon: BadgeCheck,
@@ -47,7 +47,7 @@ const AFTER = [
 const IMPACT = [
   { value: "Minutes", label: "to pull together dispute evidence", hint: "instead of chasing files across firms" },
   { value: "6 → 1", label: "custody stops, one record", hint: "supplier to buyer, every handover signed" },
-  { value: "100%", label: "of legs with a hash-checked sensor file", hint: "tampered files are flagged, not trusted" },
+  { value: "100%", label: "of stages covered by the holder's own sensor", hint: "readings edited later no longer match their on-chain hash" },
   { value: "$0", label: "moved by the platform", hint: "evidence only: firms settle off-platform" },
 ];
 

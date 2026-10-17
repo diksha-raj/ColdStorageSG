@@ -1,18 +1,12 @@
 import { expect } from "chai";
 import { network } from "hardhat";
+import { type Checks, deploy } from "./fixtures.ts";
 
-const { ethers } = await network.create();
+const { ethers, networkHelpers } = await network.create();
 
-const role = (name: string) => ethers.id(name);
-const bytes32 = (s: string) => ethers.encodeBytes32String(s);
-const fileHash = (leg: number) => ethers.sha256(ethers.toUtf8Bytes(`leg ${leg} csv`));
-const TAMPERED = ethers.sha256(ethers.toUtf8Bytes("tampered"));
-const BATCH = 2; // inside container 1; limit 4.0 °C, grace 15 min
-
-/** A passing quality check: 3.0 °C, nothing unrefrigerated, sealed, no issues. */
-const OK = { tempTenthsC: 30, unrefrigeratedMinutes: 0, damaged: false, sealIntact: true, issues: false, notesHash: ethers.ZeroHash };
-type Check = typeof OK;
-const FLAG = { SENSOR: 1n, RECEIPT_TEMP: 2n, UNREFRIGERATED: 4n, CONDITION: 8n };
+const fileHash = (stage: number) => ethers.sha256(ethers.toUtf8Bytes(`stage ${stage} readings`));
+const TAMPERED = ethers.sha256(ethers.toUtf8Bytes("edited readings"));
+const FLAG = { SENSOR: 1n, RECEIPT_TEMP: 2n, HANDOVER_GAP: 4n, CONDITION: 8n, MISSING_DATA: 16n };
 const Pass = { Pass: 0n, Flagged: 1n };
 const Outcome = { Upheld: 0, Overturned: 1, CompensationAgreed: 2 };
 const Cert = { None: 0n, Clean: 1n, Flagged: 2n, Resolved: 3n };
@@ -20,82 +14,51 @@ const Disposition = { None: 0, Released: 1, Rejected: 2 };
 
 describe("CertificateRegistry", function () {
   /**
-   * Deploys everything and runs batch 2 from origin to the buyer. `checks[stage]` overrides the
-   * outgoing/incoming check at the handover that closes that stage (0 = origin dispatch ... 4 = truck → buyer).
-   * No sensor evidence is reported yet.
+   * Runs one batch (limit 4.0 °C, 15 min grace) from the supplier to the buyer, stopping after
+   * stage `stopAfter`. `checks[stage]` overrides that handover's checks and dock time. No sensor
+   * readings are reported yet.
    */
-  async function deliver(checks: Partial<Record<number, { out?: Partial<Check>; in?: Partial<Check> }>> = {}, stopAfter = 4) {
-    const [admin, oracle, certifier, device, supplier, carrier, handler, coldStore, truck, buyer, inspector, stranger, otherInspector] =
-      await ethers.getSigners();
-    const registry = await ethers.deployContract("ParticipantRegistry", [admin.address]);
-    const custody = await ethers.deployContract("ShipmentCustody", [await registry.getAddress()]);
-    const sensors = await ethers.deployContract("SensorOracle", [await registry.getAddress(), await custody.getAddress()]);
-    const certs = await ethers.deployContract("CertificateRegistry", [
-      await registry.getAddress(),
-      await custody.getAddress(),
-      await sensors.getAddress(),
-    ]);
-    for (const [s, r] of [
-      [oracle, "ORACLE"],
-      [certifier, "CERTIFIER"],
-      [supplier, "SUPPLIER"],
-      [carrier, "CARRIER"],
-      [handler, "HANDLER"],
-      [coldStore, "COLD_STORE"],
-      [truck, "TRUCK"],
-      [buyer, "BUYER"],
-      [inspector, "INSPECTOR"],
-      [otherInspector, "INSPECTOR"],
-    ] as const) {
-      await registry.registerParticipant(s.address, role(r));
-    }
-    await sensors.registerSensor(bytes32("CTR"), device.address);
-    await sensors.registerSensor(bytes32("B"), device.address);
-    await custody.connect(supplier).createContainer(bytes32("CTR"), "0x" + "00".repeat(11));
-    await custody.connect(supplier).addBatch(1, buyer.address, inspector.address, 40, 15, bytes32("B"));
-    await custody.connect(supplier).recordSeal(1, bytes32("SGB4471203"));
-
-    const handover = async (stage: number, unit: number, from: typeof admin, to: typeof admin) => {
-      await custody.connect(from).initiateTransfer(unit, to.address, { ...OK, ...checks[stage]?.out });
-      await custody.connect(to).acceptTransfer(unit, { ...OK, ...checks[stage]?.in });
-    };
+  async function deliver(checks: Checks = {}, stopAfter = 4) {
+    const f = await deploy(ethers, (s) => networkHelpers.time.increase(s));
+    const batch = await f.newBatch();
+    const container = await f.newContainer();
     const route = [
-      () => handover(0, 1, supplier, carrier),
-      () => handover(1, 1, carrier, handler),
-      async () => {
-        await handover(2, 1, handler, coldStore);
-        await custody.connect(coldStore).splitContainer(1);
-      },
-      () => handover(3, BATCH, coldStore, truck),
-      () => handover(4, BATCH, truck, buyer),
+      () => f.toCargo(batch, container, checks),
+      () => f.toHandler(container, checks),
+      () => f.toColdStore(container, checks),
+      () => f.toTruck(batch, checks),
+      () => f.toBuyer(batch, checks),
     ];
     for (let stage = 0; stage <= stopAfter; stage++) await route[stage]();
 
-    /** Sensor commits and oracle submits a leg summary with the given breach length. */
-    const report = async (leg: number, breachMinutes = 0, submittedHash = fileHash(leg)) => {
-      if ((await sensors.committedHash(leg <= 3 ? 1 : BATCH, leg)) === ethers.ZeroHash) {
-        await sensors.connect(device).commitFileHash(BATCH, leg, fileHash(leg));
+    /** The sensor commits its readings for the stage; the oracle submits the batch's summary. */
+    const report = async (stage: number, breachMinutes = 0, missingMinutes = 0, submitted = fileHash(stage)) => {
+      const unit = Number(await f.custody.recordedOn(batch, stage));
+      if ((await f.sensors.committedHash(unit, stage)) === ethers.ZeroHash) {
+        await f.sensors.connect(f.device).commitFileHash(unit, stage, fileHash(stage));
       }
       const breach = breachMinutes > 0 ? [1000, 1000 + breachMinutes * 60] : [0, 0];
-      await sensors.connect(oracle).submitLegSummary(BATCH, leg, submittedHash, 20, breachMinutes ? 74 : 35, breachMinutes, breach[0], breach[1]);
+      await f.sensors
+        .connect(f.oracle)
+        .submitLegSummary(batch, stage, submitted, 20, breachMinutes ? 74 : 35, breachMinutes, missingMinutes, breach[0], breach[1]);
     };
 
-    /** What the Certificate Service's sync does: claims for flagged stages, then leg passes. */
-    const certifyAll = async (sensorBreaches: number[] = [0, 0, 0, 0]) => {
-      for (let leg = 1; leg <= 4; leg++) await report(leg, sensorBreaches[leg - 1]);
+    /** What the Certificate Service's sync does: claims for flagged stages, then a leg pass per stage. */
+    const certifyAll = async (sensorBreaches: number[] = [0, 0, 0, 0, 0]) => {
+      for (let stage = 0; stage <= 4; stage++) await report(stage, sensorBreaches[stage]);
       for (let stage = 0; stage <= 4; stage++) {
-        if ((await certs.stageFlags(BATCH, stage)).flags !== 0n) await certs.connect(certifier).openClaim(BATCH, stage);
-        await certs.connect(certifier).issueLegPass(BATCH, stage);
+        if ((await f.certs.stageFlags(batch, stage)).flags !== 0n) await f.certs.connect(f.certifier).openClaim(batch, stage);
+        await f.certs.connect(f.certifier).issueLegPass(batch, stage);
       }
     };
 
-    return { registry, custody, sensors, certs, certifier, supplier, carrier, handler, coldStore, buyer, inspector, stranger, otherInspector, report, certifyAll };
+    return { ...f, BATCH: batch, report, certifyAll };
   }
 
   describe("stage flags", function () {
-    it("a clean journey has no flags at any stage", async function () {
-      const { certs, report } = await deliver();
-      for (let leg = 1; leg <= 4; leg++) await report(leg);
+    it("a clean journey has no flags at any of the five stages", async function () {
+      const { certs, report, BATCH } = await deliver();
+      for (let stage = 0; stage <= 4; stage++) await report(stage);
       for (let stage = 0; stage <= 4; stage++) {
         const f = await certs.stageFlags(BATCH, stage);
         expect(f.flags).to.equal(0n);
@@ -105,22 +68,24 @@ describe("CertificateRegistry", function () {
     });
 
     it("receipt temperature above the batch's limit", async function () {
-      const { certs } = await deliver({ 1: { in: { tempTenthsC: 41 } }, 2: { in: { tempTenthsC: 40 } } });
+      const { certs, BATCH } = await deliver({ 1: { in: { tempTenthsC: 41 } }, 2: { in: { tempTenthsC: 40 } } });
       expect((await certs.stageFlags(BATCH, 1)).flags).to.equal(FLAG.RECEIPT_TEMP);
       expect((await certs.stageFlags(BATCH, 2)).flags).to.equal(0n, "exactly at the limit passes");
     });
 
-    it("sender's plus handover minutes without refrigeration above the grace period", async function () {
-      const { certs } = await deliver({
-        2: { out: { unrefrigeratedMinutes: 10 }, in: { unrefrigeratedMinutes: 6 } }, // 16 > 15
-        3: { out: { unrefrigeratedMinutes: 10 }, in: { unrefrigeratedMinutes: 5 } }, // 15: passes
+    it("a handover gap (sign-off to sign-in, unrefrigerated) longer than the grace period", async function () {
+      const { certs, BATCH } = await deliver({
+        0: { gapSeconds: 16 * 60 - 1 }, // + the sign-in's own block: 16 minutes > 15
+        2: { gapSeconds: 15 * 60 - 1 }, // 15 minutes: passes
+        1: { gapSeconds: 60 * 60 }, // the container's sensor keeps reading: never a gap
       });
-      expect((await certs.stageFlags(BATCH, 2)).flags).to.equal(FLAG.UNREFRIGERATED);
-      expect((await certs.stageFlags(BATCH, 3)).flags).to.equal(0n);
+      expect((await certs.stageFlags(BATCH, 0)).flags).to.equal(FLAG.HANDOVER_GAP);
+      expect((await certs.stageFlags(BATCH, 2)).flags).to.equal(0n);
+      expect((await certs.stageFlags(BATCH, 1)).flags).to.equal(0n);
     });
 
     it("damage, a broken seal, accepting with issues, or issues the sender reported", async function () {
-      const { certs } = await deliver({
+      const { certs, BATCH } = await deliver({
         0: { in: { damaged: true } },
         1: { in: { sealIntact: false } },
         2: { in: { issues: true } },
@@ -130,23 +95,30 @@ describe("CertificateRegistry", function () {
       expect((await certs.stageFlags(BATCH, 4)).flags).to.equal(0n);
     });
 
-    it("the sensor log's excursion longer than the grace period", async function () {
-      const { certs, report } = await deliver();
-      await report(2, 34);
-      expect((await certs.stageFlags(BATCH, 2)).flags).to.equal(FLAG.SENSOR);
+    it("the sensor's excursion longer than the grace period, at any stage including the supplier's", async function () {
+      const { certs, report, BATCH } = await deliver();
+      await report(0, 34);
+      await report(2, 15);
+      expect((await certs.stageFlags(BATCH, 0)).flags).to.equal(FLAG.SENSOR);
+      expect((await certs.stageFlags(BATCH, 2)).flags).to.equal(0n, "exactly the grace period passes");
+    });
+
+    it("minutes with no sensor readings longer than the grace period", async function () {
+      const { certs, report, BATCH } = await deliver();
+      await report(3, 0, 20);
+      expect((await certs.stageFlags(BATCH, 3)).flags).to.equal(FLAG.MISSING_DATA);
     });
 
     it("reasons combine", async function () {
-      const { certs, report } = await deliver({ 2: { in: { tempTenthsC: 72, issues: true } } });
+      const { certs, report, BATCH } = await deliver({ 2: { in: { tempTenthsC: 72, issues: true } } });
       await report(2, 34);
       expect((await certs.stageFlags(BATCH, 2)).flags).to.equal(FLAG.SENSOR | FLAG.RECEIPT_TEMP | FLAG.CONDITION);
     });
   });
 
   describe("claims", function () {
-    it("open as soon as a handover is flagged, while the batch is still in transit", async function () {
-      // The carrier finds the goods warm at pickup: a problem at origin, before any sensor log exists.
-      const { certs, certifier, supplier } = await deliver({ 0: { in: { tempTenthsC: 72 } } }, 0);
+    it("open as soon as a handover is flagged, while the batch is still in transit, against the supplier at origin", async function () {
+      const { certs, certifier, supplier, BATCH } = await deliver({ 0: { in: { tempTenthsC: 72 } } }, 0);
       await expect(certs.connect(certifier).openClaim(BATCH, 0))
         .to.emit(certs, "ClaimOpened")
         .withArgs(1, BATCH, 0, supplier.address, FLAG.RECEIPT_TEMP);
@@ -154,55 +126,50 @@ describe("CertificateRegistry", function () {
     });
 
     it("are tagged to whoever held the batch on that stage", async function () {
-      const { certs, certifier, handler, coldStore } = await deliver({ 2: { in: { tempTenthsC: 70 } }, 3: { in: { damaged: true } } });
+      const { certs, certifier, handler, coldStore, BATCH } = await deliver({ 2: { in: { tempTenthsC: 70 } }, 3: { in: { damaged: true } } });
       await certs.connect(certifier).openClaim(BATCH, 2);
       await certs.connect(certifier).openClaim(BATCH, 3);
       expect((await certs.getClaim(1)).provisionalCustodian).to.equal(handler.address);
       expect((await certs.getClaim(2)).provisionalCustodian).to.equal(coldStore.address);
     });
 
-    it("can't be opened for an unflagged stage, or twice", async function () {
-      const { certs, certifier } = await deliver({ 1: { in: { tempTenthsC: 70 } } });
+    it("can't be opened for an unflagged stage, or twice, and only by the certifier", async function () {
+      const { certs, certifier, stranger, BATCH } = await deliver({ 1: { in: { tempTenthsC: 70 } } });
       await expect(certs.connect(certifier).openClaim(BATCH, 2)).to.be.revertedWith("stage not flagged");
+      await expect(certs.connect(stranger).openClaim(BATCH, 1)).to.be.revertedWith("not the certifier");
       await certs.connect(certifier).openClaim(BATCH, 1);
       await expect(certs.connect(certifier).openClaim(BATCH, 1)).to.be.revertedWith("claim already open");
-    });
-
-    it("only the certifier opens claims", async function () {
-      const { certs, stranger } = await deliver({ 1: { in: { tempTenthsC: 70 } } });
-      await expect(certs.connect(stranger).openClaim(BATCH, 1)).to.be.revertedWith("not the certifier");
     });
   });
 
   describe("leg passes", function () {
-    it("need the closing checkpoint, and for legs 1-4 a verified sensor log", async function () {
-      const { certs, certifier, report } = await deliver({}, 2); // still at the cold store
+    it("need the closing handover and the stage's verified sensor readings", async function () {
+      const { certs, certifier, report, BATCH } = await deliver({}, 2); // at the cold store
       await expect(certs.connect(certifier).issueLegPass(BATCH, 3)).to.be.revertedWith("handover checkpoint missing");
-      await certs.connect(certifier).issueLegPass(BATCH, 0); // origin: checkpoint only
+      await expect(certs.connect(certifier).issueLegPass(BATCH, 0)).to.be.revertedWith("evidence not verified");
+      await report(0);
+      await certs.connect(certifier).issueLegPass(BATCH, 0);
+    });
+
+    it("are BLOCKED while the readings don't match the sensor's commit", async function () {
+      const { certs, certifier, report, BATCH } = await deliver();
+      await report(1, 0, 0, TAMPERED);
       await expect(certs.connect(certifier).issueLegPass(BATCH, 1)).to.be.revertedWith("evidence not verified");
       await report(1);
       await certs.connect(certifier).issueLegPass(BATCH, 1);
     });
 
-    it("are BLOCKED while the sensor log's hash mismatches", async function () {
-      const { certs, certifier, report } = await deliver();
-      await report(1, 0, TAMPERED);
-      await expect(certs.connect(certifier).issueLegPass(BATCH, 1)).to.be.revertedWith("evidence not verified");
-      await report(1);
-      await certs.connect(certifier).issueLegPass(BATCH, 1);
-    });
-
-    it("record the verdict, its reasons, the receipt temperature and unrefrigerated time", async function () {
-      const { certs, certifier, handler, report } = await deliver({ 2: { out: { unrefrigeratedMinutes: 9 }, in: { tempTenthsC: 72, unrefrigeratedMinutes: 8 } } });
+    it("record the verdict, its reasons, the receipt temperature and the handover gap", async function () {
+      const { certs, certifier, handler, report, BATCH } = await deliver({ 2: { in: { tempTenthsC: 72 }, gapSeconds: 20 * 60 - 1 } });
       await report(2, 34);
       await certs.connect(certifier).openClaim(BATCH, 2);
       await expect(certs.connect(certifier).issueLegPass(BATCH, 2))
         .to.emit(certs, "LegPassIssued")
-        .withArgs(1, BATCH, 2, Pass.Flagged, FLAG.SENSOR | FLAG.RECEIPT_TEMP | FLAG.UNREFRIGERATED);
+        .withArgs(1, BATCH, 2, Pass.Flagged, FLAG.SENSOR | FLAG.RECEIPT_TEMP | FLAG.HANDOVER_GAP);
       const lp = await certs.getLegPass(1);
       expect(lp.custodian).to.equal(handler.address);
       expect(lp.receiptTenthsC).to.equal(72n);
-      expect(lp.unrefrigeratedMinutes).to.equal(17n);
+      expect(lp.gapMinutes).to.equal(20n);
       expect(lp.breachMinutes).to.equal(34n);
       await expect(certs.connect(certifier).issueLegPass(BATCH, 2)).to.be.revertedWith("leg pass already issued");
     });
@@ -210,32 +177,30 @@ describe("CertificateRegistry", function () {
 
   describe("final certificate", function () {
     it("REJECTS issuing before every stage has reported", async function () {
-      const { certs, certifier, report } = await deliver({}, 3);
-      for (let leg = 1; leg <= 3; leg++) await report(leg);
-      for (let stage = 0; stage <= 3; stage++) await certs.connect(certifier).issueLegPass(BATCH, stage);
+      const { certs, certifier, report, BATCH } = await deliver({}, 3);
+      for (let stage = 0; stage <= 3; stage++) {
+        await report(stage);
+        await certs.connect(certifier).issueLegPass(BATCH, stage);
+      }
       await expect(certs.connect(certifier).issueFinalCertificate(BATCH)).to.be.revertedWith("not every stage has reported");
     });
 
     it("is Clean when all five stages passed", async function () {
-      const { certs, certifier, certifyAll } = await deliver();
+      const { certs, certifier, certifyAll, BATCH } = await deliver();
       await certifyAll();
-      await expect(certs.connect(certifier).issueFinalCertificate(BATCH))
-        .to.emit(certs, "FinalCertificateIssued")
-        .withArgs(BATCH, Cert.Clean);
+      await expect(certs.connect(certifier).issueFinalCertificate(BATCH)).to.emit(certs, "FinalCertificateIssued").withArgs(BATCH, Cert.Clean);
       expect((await certs.getCertificate(BATCH)).legPassIds).to.deep.equal([1n, 2n, 3n, 4n, 5n]);
     });
 
     it("is Flagged when any stage is, and needs that stage's claim first", async function () {
-      const { certs, certifier, report } = await deliver({ 0: { in: { damaged: true } } });
-      for (let leg = 1; leg <= 4; leg++) await report(leg);
-      for (let stage = 0; stage <= 4; stage++) await certs.connect(certifier).issueLegPass(BATCH, stage);
-      await expect(certs.connect(certifier).issueFinalCertificate(BATCH)).to.be.revertedWith(
-        "open a claim for every flagged stage first",
-      );
+      const { certs, certifier, report, BATCH } = await deliver({ 0: { in: { damaged: true } } });
+      for (let stage = 0; stage <= 4; stage++) {
+        await report(stage);
+        await certs.connect(certifier).issueLegPass(BATCH, stage);
+      }
+      await expect(certs.connect(certifier).issueFinalCertificate(BATCH)).to.be.revertedWith("open a claim for every flagged stage first");
       await certs.connect(certifier).openClaim(BATCH, 0);
-      await expect(certs.connect(certifier).issueFinalCertificate(BATCH))
-        .to.emit(certs, "FinalCertificateIssued")
-        .withArgs(BATCH, Cert.Flagged);
+      await expect(certs.connect(certifier).issueFinalCertificate(BATCH)).to.emit(certs, "FinalCertificateIssued").withArgs(BATCH, Cert.Flagged);
     });
   });
 
@@ -249,20 +214,20 @@ describe("CertificateRegistry", function () {
     });
 
     it("can be made while the batch is still in transit", async function () {
-      const { certs, certifier, inspector } = await deliver({ 1: { in: { tempTenthsC: 70 } } }, 1);
+      const { certs, certifier, inspector, BATCH } = await deliver({ 1: { in: { tempTenthsC: 70 } } }, 1);
       await certs.connect(certifier).openClaim(BATCH, 1);
-      await certs.connect(inspector).submitResolution(1, Outcome.Upheld, "Carrier's reefer failed; confirmed with their log");
+      await certs.connect(inspector).submitResolution(1, Outcome.Upheld, "Cargo's reefer failed; confirmed with their sensor");
       expect(await certs.openClaimCount(BATCH)).to.equal(0n);
     });
 
     it("ruling on the last open claim moves the certificate from Flagged to Resolved", async function () {
-      const { certs, certifier, certifyAll, inspector } = await deliver({ 1: { in: { tempTenthsC: 70 } } });
-      await certifyAll([0, 34, 0, 0]); // also a sensor breach on leg 2 → two claims
+      const { certs, certifier, certifyAll, inspector, BATCH } = await deliver({ 1: { in: { tempTenthsC: 70 } } });
+      await certifyAll([0, 0, 34, 0, 0]); // also a sensor breach at stage 2 → two claims
       await certs.connect(certifier).issueFinalCertificate(BATCH);
 
-      await certs.connect(inspector).submitResolution(1, Outcome.CompensationAgreed, "Carrier agreed a 10% credit");
+      await certs.connect(inspector).submitResolution(1, Outcome.CompensationAgreed, "Cargo agreed a 10% credit");
       expect((await certs.getCertificate(BATCH)).status).to.equal(Cert.Flagged);
-      await expect(certs.connect(inspector).submitResolution(2, Outcome.Overturned, "Logger against the door seal"))
+      await expect(certs.connect(inspector).submitResolution(2, Outcome.Overturned, "Sensor against the door seal"))
         .to.emit(certs, "CertificateStatusChanged")
         .withArgs(BATCH, Cert.Resolved);
       expect((await certs.getCertificate(BATCH)).resolutionIds).to.deep.equal([1n, 2n]);
@@ -273,30 +238,24 @@ describe("CertificateRegistry", function () {
       await certifyAll();
       await expect(certs.connect(inspector).submitResolution(1, Outcome.Upheld, "")).to.be.revertedWith("note must be 1-1000 bytes");
       await certs.connect(inspector).submitResolution(1, Outcome.Upheld, "ok");
-      await expect(certs.connect(inspector).submitResolution(1, Outcome.Overturned, "again")).to.be.revertedWith(
-        "claim already resolved",
-      );
+      await expect(certs.connect(inspector).submitResolution(1, Outcome.Overturned, "again")).to.be.revertedWith("claim already resolved");
     });
   });
 
   describe("QA final decision and buyer acknowledgement", function () {
     it("only the assigned inspector decides, after the certificate and every ruling", async function () {
-      const { certs, certifier, certifyAll, inspector, otherInspector } = await deliver({ 1: { in: { tempTenthsC: 70 } } });
+      const { certs, certifier, certifyAll, inspector, otherInspector, BATCH } = await deliver({ 1: { in: { tempTenthsC: 70 } } });
       await certifyAll();
-      await expect(certs.connect(inspector).submitDisposition(BATCH, Disposition.Released, "ok")).to.be.revertedWith(
-        "no final certificate yet",
-      );
+      await expect(certs.connect(inspector).submitDisposition(BATCH, Disposition.Released, "ok")).to.be.revertedWith("no final certificate yet");
       await certs.connect(certifier).issueFinalCertificate(BATCH);
       await expect(certs.connect(inspector).submitDisposition(BATCH, Disposition.Released, "ok")).to.be.revertedWith(
         "rule on every flagged stage first",
       );
-      await certs.connect(inspector).submitResolution(1, Outcome.Upheld, "Carrier responsible");
+      await certs.connect(inspector).submitResolution(1, Outcome.Upheld, "Cargo responsible");
       await expect(certs.connect(otherInspector).submitDisposition(BATCH, Disposition.Released, "ok")).to.be.revertedWith(
         "not the assigned inspector",
       );
-      await expect(certs.connect(inspector).submitDisposition(BATCH, Disposition.None, "ok")).to.be.revertedWith(
-        "choose release or reject",
-      );
+      await expect(certs.connect(inspector).submitDisposition(BATCH, Disposition.None, "ok")).to.be.revertedWith("choose release or reject");
 
       await expect(certs.connect(inspector).submitDisposition(BATCH, Disposition.Rejected, "Core temp 7 °C on arrival; not sellable"))
         .to.emit(certs, "DispositionSubmitted")
@@ -304,17 +263,15 @@ describe("CertificateRegistry", function () {
       const d = await certs.getDecision(BATCH);
       expect(d.disposition).to.equal(BigInt(Disposition.Rejected));
       expect(d.note).to.equal("Core temp 7 °C on arrival; not sellable");
-      await expect(certs.connect(inspector).submitDisposition(BATCH, Disposition.Released, "changed mind")).to.be.revertedWith(
-        "already decided",
-      );
+      await expect(certs.connect(inspector).submitDisposition(BATCH, Disposition.Released, "changed mind")).to.be.revertedWith("already decided");
     });
 
     it("REJECTS acknowledgement from anyone but the batch's buyer, and before QA decides", async function () {
-      const { certs, certifier, certifyAll, buyer, inspector, stranger } = await deliver();
+      const { certs, certifier, certifyAll, buyer, inspector, stranger, BATCH } = await deliver();
       await certifyAll();
       await certs.connect(certifier).issueFinalCertificate(BATCH);
       await expect(certs.connect(buyer).acknowledgeReceipt(BATCH)).to.be.revertedWith("awaiting QA decision");
-      await certs.connect(inspector).submitDisposition(BATCH, Disposition.Released, "All five checkpoints passed");
+      await certs.connect(inspector).submitDisposition(BATCH, Disposition.Released, "All five stages passed");
       for (const who of [stranger, inspector]) {
         await expect(certs.connect(who).acknowledgeReceipt(BATCH)).to.be.revertedWith("not the batch's buyer");
       }
@@ -324,7 +281,7 @@ describe("CertificateRegistry", function () {
   });
 
   it("everything stops while paused", async function () {
-    const { registry, certs, certifier } = await deliver({ 1: { in: { tempTenthsC: 70 } } });
+    const { registry, certs, certifier, BATCH } = await deliver({ 1: { in: { tempTenthsC: 70 } } });
     await registry.pause();
     await expect(certs.connect(certifier).openClaim(BATCH, 1)).to.be.revertedWith("system paused");
   });

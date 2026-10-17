@@ -24,8 +24,8 @@ export const ISSUE_CATEGORIES = [
 const idSchema = z.coerce.number().int().positive();
 
 /**
- * The (unit, stage) pairs whose entries belong to a holder's current leg. After the split, a
- * batch's cold-store leg also includes what was recorded on its container at the cold store.
+ * The (unit, stage) pairs whose entries belong to a holder's current stage. Once unloaded, a
+ * batch's cold-store stage also includes what was recorded on its container at the cold store.
  */
 function logScope(unitId: number, u: any): [number, number][] {
   const stage = Number(u.stage);
@@ -68,7 +68,6 @@ function formatCheck(c: any) {
   if (Number(c.checkedAt) === 0) return null;
   return {
     tempC: Number(c.tempTenthsC) / 10,
-    unrefrigeratedMinutes: Number(c.unrefrigeratedMinutes),
     damaged: c.damaged,
     sealIntact: c.sealIntact,
     issues: c.issues,
@@ -84,24 +83,31 @@ async function sealedBody(hash: string) {
   return rows[0] ? JSON.parse(rows[0].body) : null;
 }
 
-/** Every handover checkpoint relevant to a unit: a batch sees its container's (stages 0-2) and its own (3-4). */
+/**
+ * Every handover check relevant to a unit. A batch: its own at the supplier → Cargo handover
+ * (stage 0), its container's for stages 1-2, then its own for 3-4. A container: stages 1-2.
+ */
 export async function checkpointsFor(unitId: number, u: any) {
   const isBatch = Number(u.kind) === 2;
+  const box = Number(u.containerId);
   const pairs: [number, number][] = isBatch
     ? [
-        [Number(u.containerId), 0],
-        [Number(u.containerId), 1],
-        [Number(u.containerId), 2],
+        [unitId, 0],
+        [box, 1],
+        [box, 2],
         [unitId, 3],
         [unitId, 4],
       ]
     : [
-        [unitId, 0],
         [unitId, 1],
         [unitId, 2],
       ];
   const out = [];
   for (const [unit, stage] of pairs) {
+    if (unit === 0) {
+      out.push({ stage, recordedOn: null, outgoing: null, incoming: null }); // not in a container yet
+      continue;
+    }
     const cp = await custody().getCheckpoint(unit, stage);
     const outgoing = formatCheck(cp.outgoing);
     const incoming = formatCheck(cp.incoming);
