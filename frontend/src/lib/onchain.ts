@@ -141,7 +141,7 @@ export async function batchHistory(batchId: number, containerId: number): Promis
   const units = new Set([batchId, containerId]);
 
   // An event belongs to the batch if it names the batch, one of its claims, or (custody and sensor
-  // events) its container, which carried the batch on legs 1-2.
+  // events) its container, which carried the batch through stages 1-2.
   const belongs = (a: Record<string, unknown>) => {
     if (a.batchId !== undefined) return a.batchId === batchId;
     if (a.claimId !== undefined) return claimIds.has(a.claimId as number);

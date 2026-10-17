@@ -1,41 +1,52 @@
-# 10-minute demo run sheet
+# Demo run sheet (about 15 minutes)
 
-The story: **a chilled salmon shipment warms up in transit. ColdChainSG shows where, who held it, and lets QA decide, without any firm having to chase anyone for evidence.**
+The story: **two batches go by sea from Melbourne to Singapore. The salmon warms up at three points; the cheese, with looser limits, doesn't. Every holder's own sensor and every signed handover show where, who held it and for how long, and QA decides, without any firm having to chase anyone for evidence.**
+
+All times are real. To fit the demo in minutes, the batches get short grace periods: salmon 2 minutes, cheese 10.
 
 ## Before the session (about 5 minutes)
 
 1. Start everything fresh:
    - `npm run chain`
    - `npm run deploy`
-   - start the four services
+   - start the five services (identity, custody, oracle, certificate, sensor gateway)
    - `npm run seed`
    - `npm run web`
 2. In MetaMask, import the keys that `npm run seed` printed. Connect each account to localhost:5173 the first time you use it. If the chain was restarted since you last imported them, clear each account's activity (Settings → Advanced → Clear activity tab data).
-3. Open http://localhost:5173.
+3. Have `data/raw/reefer-excursion.csv` to hand: it's Cargo's reefer controller export (a defrost fault at about 6.5 °C from minute 2 to 7).
+4. Open http://localhost:5173.
 
-## Run (about 10 minutes)
+## Run
 
-| Time | Who (MetaMask account) | Do | Say |
+| When | Who (MetaMask account) | Do | Say |
 | --- | --- | --- | --- |
 | 0:00 | — | Landing page; let the animation run once | Evidence is scattered across five firms, so disputes take weeks. |
-| 0:45 | Merlion Fresh Supplies | **New container**: salmon (≤ 4 °C) for Tiong Bahru Grocers, cheese (≤ 8 °C) for Marina Bay Dining → **Create** | Each batch has its own buyer, quality inspector and limits, on-chain. The container number is left blank, so an ISO 6346 number (`CCSU1126480`) is generated on-chain. A supplier could type the real box's number instead, which is checked on-chain. |
-| 1:30 | Admin | **Demo control**: set the container's **leg 2 to Breach** | Stands in for the real sensor, which we don't have. |
-| 1:45 | Merlion Fresh Supplies | **Log temperature** 2.8 °C → **Check & hand over to Cargo**, seal number `SGB4471203`, dispatch 2.9 °C → sign (two transactions: seal, then handover) | The sender's signed check: how it left, and the seal it left under. The seal number is fixed once the carrier has the container and is printed on the certificate. |
-| 2:30 | Equator Air Cargo | **Inspect & accept** (3.0 °C). **Report issue**: refrigeration failure, 25 min, "reefer tripped during refuelling". **Check & hand over**: 5.2 °C, leg 1 sensor log *Compliant log* | The carrier is honest about the problem; it's sealed into their signed check, and their sensor log goes in with the handover. |
-| 3:30 | Runway Cargo Handlers | **Inspect & accept**: 7.1 °C, **Accept with issues**. Point at the red preview: *"This will flag Batch #2…"* → sign | The receiver records what they found. No rejection, no re-chilling: the stage is flagged permanently. |
-| 4:15 | Tiong Bahru Grocers QA | Dashboard: the flagged stage is already there, **mid-journey**. Open it → both checks side by side → **Upheld** + note | QA sees problems the moment they happen, not weeks later. |
-| 5:00 | Runway → Merlion Fresh Cold Store | Handler **Check & hand over** with leg 2 sensor log *Breached log*; cold store inspects and accepts | The handler's log is checked against the sensor the moment the cold store accepts. |
-| 5:30 | Merlion Fresh Cold Store | **Upload log & split**, choosing *Edited log*. Seconds later the **Sensor logs** card shows a **hash mismatch** → upload *Compliant log* | An edited log is caught automatically. |
-| 6:30 | Cold Store → Kallang Reefer Trucks → each buyer | Check out each batch → truck inspects and accepts → **Check & deliver to buyer** with each batch's leg 4 log → each buyer **Inspect & accept delivery**. Admin **Sync now** | Every handover was a two-sided check, with its sensor log. |
-| 7:30 | Tiong Bahru Grocers | Open Batch #2: *"Problem first detected at Cargo → Destination Freight Handler"*, the five-stage record, and the charts | The whole story on one page. |
-| 8:00 | Tiong Bahru Grocers QA | Rule on the sensor claim (**Verify file on-chain** → *Compensation agreed*) → **Ready for your final decision** → **Reject** with a reason | QA's two jobs: who's responsible, and whether it's sellable. |
-| 9:00 | Tiong Bahru Grocers | **Acknowledge receipt** → **Printable certificate** → *Print / Save as PDF* | The batch is closed, with a certificate anyone can verify against the chain: open the QR link (or scan it on this machine) to show the public verification page and the batch's full transaction history, no sign-in needed. No money moved; the firms settle between themselves. |
-| 9:30 | Admin | **Overview** (checks passed and failed, flags by stage and reason, QA decisions) and **Audit log** | Every step is in the on-chain record. |
+| 0:40 | Merlion Fresh Supplies | **New batches**: salmon ≤ 4 °C, **2 min** grace, for Tiong Bahru Grocers; cheese ≤ 8 °C, **10 min** grace, for Marina Bay Dining. Cold-room sensor: *Demo simulation: compliant sensor registration* → **Create batches** | Each batch's limits are fixed on-chain. The supplier's own cold-room sensor holds below the tightest limit (try a frozen batch: it holds below that limit too). |
+| 1:30 | Merlion Fresh Supplies | **Log temperature** 2.8 °C on the salmon → **Check & hand over to Cargo** for each batch (2.9 °C) | Signing off records the moment it leaves the supplier. |
+| 2:00 | Equator Air Cargo | **Open a container**: sea, *MSC AURORA 041E*, Melbourne → Singapore; number left blank. Sensor: *Register your sensor for this supply*, id `RCU-88213`, attach `reefer-excursion.csv` → **Open container** | The container number is generated in ISO 6346 form. Cargo's own reefer sensor: its export stands in for the live feed, from now. |
+| 2:40 | Equator Air Cargo | **Inspect & receive into container** for each batch (within 2 minutes of the supplier's sign-off) | Receiving straight into the container is each batch's entry time. |
+| 3:00 | Equator Air Cargo | **Report issue**: refrigeration failure, 5 min, "defrost fault mid-voyage". Talk through the dashboards while the voyage runs: wait until about 8 minutes after opening the container | The export's defrost fault runs from minute 2 to 7. |
+| 9:00 | Equator Air Cargo | **Check & hand over to Destination Freight Handler**: seal `SGB4471203`, 5.2 °C → **Seal, sign check & hand over** | Cargo seals after loading; the seal number is fixed from here and printed on the certificate. |
+| 9:20 | Runway Cargo Handlers | **Inspect & accept**: 6.8 °C. Point at the red preview: *"This will flag Batch #1…"*, and the cheese within its 8 °C → sign | The handler registers no sensor: the container's own keeps reading. |
+| 9:40 | Tiong Bahru Grocers QA | Dashboard: the flagged stage is already there, **mid-journey**. Open it: too warm on receipt, and Cargo's own sensor above 4 °C for about 6 minutes → **Upheld** + note | QA sees problems the moment they happen, from the holder's own data. |
+| 10:20 | Runway → Merlion Fresh Cold Store | Handler **Check & hand over to Cold Store**. Wait 3 minutes, then the cold store **Inspect & accept** | That dock time is measured from the two signatures: over the salmon's 2-minute grace, inside the cheese's 10. |
+| 13:30 | Merlion Fresh Cold Store | **Register your cold-room sensor** (demo compliant) → **Unload container** → **Check & hand over to Reefer Truck** for each batch | The container's job is done; batches go on singly. |
+| 14:00 | Kallang Reefer Trucks | **Inspect & accept** each batch → the salmon's truck sensor: *Demo simulation: breached sensor registration*; the cheese's: compliant → after about 4 minutes, **Check & deliver to buyer** for each | The salmon's truck refrigeration fails a minute in and climbs past its limit. |
+| 18:00 | Each buyer | **Inspect & accept delivery** (salmon 8.7 °C, *Accept with issues*; cheese 3.7 °C) | Every handover was two signatures; every stage had its holder's sensor. |
+| 18:30 | Tiong Bahru Grocers | Open Batch #1: *"Problem first detected while with Cargo"*, the five handover checks, and the journey chart: each holder's readings, red excursions, amber dock gaps | The whole story on one page, in real time. |
+| 19:00 | Tiong Bahru Grocers QA | Rule on the dock-time claim (**Verify readings on-chain** → *Compensation agreed*) and the truck claim (*Upheld*) → **Ready for your final decision** → **Reject** with a reason | QA's two jobs: who's responsible, and whether it's sellable. |
+| 19:40 | Tiong Bahru Grocers | **Acknowledge receipt** → **Printable certificate**. Open its QR link: the public verification page and the batch's full transaction history, no sign-in | No money moved; the firms settle between themselves. |
+| 20:00 | Marina Bay Dining / Admin | The cheese's page: all five checks passed. Admin: **Overview** and **Audit log** | Same journey, different limits, different verdict, all on-chain. |
+
+To shorten it, skip the waits: the salmon is still flagged on receipt at the handler and on delivery, and the cheese stays clean.
 
 ## If something goes wrong
 
 - **"Nonce too high" in MetaMask:** clear that account's activity data (see above).
 - **A dashboard looks stale:** it refreshes every few seconds on its own, or reload the page.
-- **"Waiting for the sensor…" / "Checking…" on the Sensor logs card:** a log uploaded at handover is checked a few seconds after the receiver accepts.
-- **Can't set a leg to Breach:** that leg has already ended. Set it right after creating the container.
-- **No "final decision" option for QA:** the certificate needs all five stages (checkpoints plus sensor logs for legs 1–4), and every flagged stage must have a ruling.
+- **"Sensor readings being verified":** a stage's readings are committed and summarised a few seconds after the receiver signs in.
+- **"Register a sensor first":** the holder hasn't registered its sensor for this stage yet; it's the first action on the shipment's card.
+- **A stage was flagged for its handover gap unexpectedly:** the receiver signed in more than the batch's grace period after the sender signed off.
+- **The salmon's stage 1 isn't flagged by the sensor:** Cargo signed the container off before the export's fault (minutes 2 to 7 after registering the sensor) had run longer than the grace period.
+- **No "final decision" option for QA:** the certificate needs all five stages (handover plus verified readings), and every flagged stage must have a ruling.
+- **Showing tamper detection:** change a reading in `gateway.commits` in Postgres; the batch page's **Verify readings on-chain** then reports that the stored readings don't match the sensor's commit.

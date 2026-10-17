@@ -1,7 +1,7 @@
 // Keeps the certificate lifecycle moving. Every few seconds it looks at each open batch and
-// does whatever is due next, for each of the five stages (0 origin ... 4 reefer truck):
-//   stage flagged (by a handover check or the sensor log) without a claim -> openClaim
-//   checkpoint done (and, for legs 1-4, a verified sensor log) but no LegPass -> issueLegPass
+// does whatever is due next, for each of the five stages (0 supplier ... 4 reefer truck):
+//   stage flagged (by a handover check, the handover gap or the sensor) without a claim -> openClaim
+//   closing handover signed in and the stage's sensor readings verified, but no LegPass -> issueLegPass
 //   all five LegPasses but no final certificate -> issueFinalCertificate
 // Claims open as soon as a handover is flagged, so QA sees problems while the batch is in transit.
 // Each step is idempotent, so a restart or missed event never leaves a batch stuck.

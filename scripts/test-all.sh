@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 # Runs every test suite against an ISOLATED stack, so the demo stack is never touched:
 #
-#   chain  :8546   database coldchainsg_e2e   services :4101-4104   web :5174
+#   chain  :8546   database coldchainsg_e2e   services :4101-4105   web :5174
 #
 # Usage: npm run test:all        (Postgres must be running; nothing else needs to be)
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 LOGS="${LOGS:-$(mktemp -d)}"
-PORTS=(8546 4101 4102 4103 4104 5174)
+PORTS=(8546 4101 4102 4103 4104 4105 5174)
 export CHAIN_NETWORK=e2e RPC_URL=http://127.0.0.1:8546
 export DATABASE_URL=postgres://localhost:5433/coldchainsg_e2e
-export IDENTITY_PORT=4101 CUSTODY_PORT=4102 ORACLE_PORT=4103 CERTIFICATE_PORT=4104
+export IDENTITY_PORT=4101 CUSTODY_PORT=4102 ORACLE_PORT=4103 CERTIFICATE_PORT=4104 GATEWAY_PORT=4105
 export FRONTEND_ORIGIN=http://localhost:5174 E2E_WEB_URL=http://localhost:5174
 export VITE_IDENTITY_URL=http://localhost:4101 VITE_CUSTODY_URL=http://localhost:4102
-export VITE_ORACLE_URL=http://localhost:4103 VITE_CERTIFICATE_URL=http://localhost:4104
+export VITE_ORACLE_URL=http://localhost:4103 VITE_CERTIFICATE_URL=http://localhost:4104 VITE_GATEWAY_URL=http://localhost:4105
 export SCREENSHOT_DIR="${SCREENSHOT_DIR:-$PWD/frontend/e2e/screenshots}"
 
 stop_stack() { for p in "${PORTS[@]}"; do lsof -tiTCP:"$p" -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null; done; }
@@ -47,9 +47,9 @@ done
 (cd contracts && npx hardhat run scripts/deploy.ts --network e2e > "$LOGS/deploy.log" 2>&1) || { echo "Deploy failed: $LOGS/deploy.log"; exit 1; }
 npx tsx services/common/scripts/reset-db.ts >> "$LOGS/deploy.log" 2>&1
 
-for s in identity custody oracle certificate; do npm start -w "services/$s-service" > "$LOGS/$s.log" 2>&1 & disown; done
+for s in identity-service custody-service oracle-service certificate-service sensor-gateway; do npm start -w "services/$s" > "$LOGS/${s%-service}.log" 2>&1 & disown; done
 (cd frontend && npx vite --port 5174 --strictPort > "$LOGS/web.log" 2>&1) & disown
-for port in 4101 4102 4103 4104; do wait_for "http://localhost:$port/health"; done
+for port in 4101 4102 4103 4104 4105; do wait_for "http://localhost:$port/health"; done
 wait_for http://localhost:5174
 npx tsx services/common/scripts/seed-demo.ts > "$LOGS/seed.log" 2>&1 || { echo "Seed failed: $LOGS/seed.log"; exit 1; }
 
@@ -65,12 +65,13 @@ run() {
   fi
 }
 
-# The browser test expects a fresh chain (Container #1), so it runs first.
+# The browser test expects a fresh chain (its batches are #1 and #2), so it runs first.
 run browser      npx tsx --test --test-concurrency=1 frontend/e2e/demo.e2e.ts
 run contracts    npm test -w contracts
 run identity     npm test -w services/identity-service
 run custody      npm test -w services/custody-service
 run oracle       npm test -w services/oracle-service
 run certificate  npm test -w services/certificate-service
+run gateway      npm test -w services/sensor-gateway
 
 exit $FAILED

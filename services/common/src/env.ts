@@ -16,12 +16,13 @@ const schema = z.object({
   ADMIN_PRIVATE_KEY: z.string().optional(),
   ORACLE_PRIVATE_KEY: z.string().optional(),
   CERTIFIER_PRIVATE_KEY: z.string().optional(),
-  // Simulated sensor device keys, used by the Oracle Service's replay to sign the sensor's hash commit.
+  // The sensor gateway's key: funds each sensor's device key and derives it (see sensor-gateway).
   SENSOR_PRIVATE_KEY: z.string().optional(),
   IDENTITY_PORT: z.coerce.number().default(4001),
   CUSTODY_PORT: z.coerce.number().default(4002),
   ORACLE_PORT: z.coerce.number().default(4003),
   CERTIFICATE_PORT: z.coerce.number().default(4004),
+  GATEWAY_PORT: z.coerce.number().default(4005),
 });
 
 export const env = schema.parse(process.env);

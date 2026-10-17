@@ -36,8 +36,9 @@ const idSchema = z.coerce.number().int().positive();
 const FLAG_REASONS: [number, string][] = [
   [1, "sensor_excursion"],
   [2, "receipt_temp"],
-  [4, "unrefrigerated"],
+  [4, "handover_gap"],
   [8, "condition"],
+  [16, "missing_data"],
 ];
 const reasons = (flags: bigint | number) => FLAG_REASONS.filter(([bit]) => Number(flags) & bit).map(([, r]) => r);
 
@@ -56,10 +57,11 @@ async function readLegPass(id: bigint) {
     status: PASS[Number(lp.status)],
     reasons: reasons(lp.flags),
     receiptTempC: Number(lp.receiptTenthsC) / 10,
-    unrefrigeratedMinutes: Number(lp.unrefrigeratedMinutes),
+    gapMinutes: Number(lp.gapMinutes),
     fileHash: lp.fileHash,
     maxTempC: Number(lp.maxTenthsC) / 10,
     breachMinutes: Number(lp.breachMinutes),
+    missingMinutes: Number(lp.missingMinutes),
     issuedAt: Number(lp.issuedAt),
   };
 }
@@ -146,7 +148,7 @@ async function readBatchCertificate(batchId: number) {
   };
 }
 
-/** Batch ids the caller may see: admins see all; others see batches they import, buy or inspect. */
+/** Batch ids the caller may see: admins see all; others see batches they supplied, held, buy or inspect. */
 async function visibleBatchIds(wallet: string, role: string | null) {
   const cust = custody();
   const nextId = Number(await cust.nextId());
@@ -154,7 +156,8 @@ async function visibleBatchIds(wallet: string, role: string | null) {
   for (let id = 1; id < nextId; id++) {
     const u = await cust.getUnit(id);
     if (Number(u.kind) !== 2) continue;
-    if (role === "ADMIN" || [u.supplier, u.buyer, u.inspector].includes(wallet)) ids.push(id);
+    const holders = role === "ADMIN" ? [] : (await cust.getHistory(id)).map((h: any) => h.custodian);
+    if (role === "ADMIN" || [u.supplier, u.buyer, u.inspector, ...holders].includes(wallet)) ids.push(id);
   }
   return ids;
 }
@@ -261,16 +264,17 @@ app.get("/kpis", requireAuth, async (_req, res) => {
     flagReasons: Object.fromEntries(
       FLAG_REASONS.map(([, r]) => [r, batches.flatMap((b) => b.stages).filter((st) => st.reasons.includes(r)).length]),
     ),
-    // Stages 0-2 are one handover per container, shared by its batches: count each container once.
-    unrefrigeratedMinutesByLeg: STAGES.map((leg) => {
+    // Minutes on the dock, unrefrigerated, at each handover. The handler → cold store handover
+    // (closing stage 2) is one per container, shared by its batches: count each container once.
+    gapMinutesByStage: STAGES.map((leg) => {
       const seen = new Set<string>();
       const minutes = passes
         .filter((lp) => lp.leg === leg)
         .filter((lp) => {
-          const key = leg <= 2 ? `c${lp.shipmentId}` : `b${lp.batchId}`;
+          const key = leg === 2 ? `c${lp.shipmentId}` : `b${lp.batchId}`;
           return seen.has(key) ? false : (seen.add(key), true);
         })
-        .reduce((sum, lp) => sum + lp.unrefrigeratedMinutes, 0);
+        .reduce((sum, lp) => sum + lp.gapMinutes, 0);
       return { leg, minutes };
     }),
     dispositions: {

@@ -1,7 +1,8 @@
 // Onboards the demo organisations through the real flow (sign in → request access → admin
-// approves on-chain) and registers the demo sensors. Safe to re-run: existing ones are skipped.
+// approves on-chain). Safe to re-run: organisations already registered are skipped. Sensors aren't
+// seeded: each party registers its own when it takes a shipment.
 //
-//   npm run seed      (needs the chain, a deployment, and the identity + oracle services running)
+//   npm run seed      (needs the chain, a deployment, and the identity service running)
 //
 // Wallets are Hardhat's PUBLIC test accounts #4-#12 — fine for a local demo, never for real funds.
 import { HDNodeWallet, Wallet } from "ethers";
@@ -10,7 +11,6 @@ import { api, signIn } from "../src/testing.ts";
 
 const MNEMONIC = "test test test test test test test test test test test junk"; // Hardhat default
 const identity = api(`http://localhost:${env.IDENTITY_PORT}`);
-const oracle = api(`http://localhost:${env.ORACLE_PORT}`);
 
 const PERSONAS = [
   { account: 4, role: "SUPPLIER", org: "Merlion Fresh Supplies", email: "ops@merlionfresh.example" },
@@ -24,13 +24,6 @@ const PERSONAS = [
   { account: 12, role: "INSPECTOR", org: "Marina Bay Dining QA", email: "qa@mbdining.example" },
 ] as const;
 
-const SENSORS = [
-  { sensorId: "SENS-CTR-01", label: "Reefer container logger" },
-  { sensorId: "SENS-CTR-02", label: "Reefer container logger (spare)" },
-  { sensorId: "SENS-B-01", label: "Batch logger" },
-  { sensorId: "SENS-B-02", label: "Batch logger" },
-  { sensorId: "SENS-B-03", label: "Batch logger" },
-];
 
 const walletFor = (i: number) => HDNodeWallet.fromPhrase(MNEMONIC, undefined, `m/44'/60'/0'/0/${i}`);
 const adminToken = await signIn(new Wallet(env.ADMIN_PRIVATE_KEY!));
@@ -55,14 +48,6 @@ for (const p of PERSONAS) {
   const approved = await identity(`/access-requests/${requestId}/approve`, { token: adminToken, body: {} });
   if (approved.status !== 200) throw new Error(`${p.org}: ${JSON.stringify(approved.body)}`);
   console.log(`  + ${p.org} registered as ${p.role}`);
-}
-
-const existing = new Set(((await oracle("/sensors", { token: adminToken })).body as any[]).map((s) => s.sensor_id));
-for (const s of SENSORS) {
-  if (existing.has(s.sensorId)) continue;
-  const res = await oracle("/sensors", { token: adminToken, body: s });
-  if (res.status !== 201) throw new Error(`${s.sensorId}: ${JSON.stringify(res.body)}`);
-  console.log(`  + sensor ${s.sensorId}`);
 }
 
 console.log("\nImport these into MetaMask (Hardhat public test keys — local demo only):\n");

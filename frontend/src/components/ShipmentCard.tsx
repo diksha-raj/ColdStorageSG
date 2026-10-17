@@ -1,12 +1,15 @@
 import { Container, Package } from "lucide-react";
 import type { ReactNode } from "react";
 import { Link } from "react-router";
-import { STAGE_LABELS, formatDate } from "../lib/format";
+import { formatDate, whereIs } from "../lib/format";
 import type { Unit } from "../lib/types";
 import { Badge, Party } from "./ui";
 
 export function unitTitle(u: Unit) {
-  if (u.kind === "container") return `Container ${u.containerCode}${u.details?.origin ? ` from ${u.details.origin}` : ""}`;
+  if (u.kind === "container") {
+    const route = u.details?.origin ? ` · ${u.details.origin} → ${u.details.destination}` : "";
+    return `Container ${u.containerCode}${route}`;
+  }
   return `Batch #${u.id}${u.details?.product ? ` · ${u.details.product}` : ""}`;
 }
 
@@ -25,8 +28,13 @@ export function ShipmentCard({ unit, children, status }: { unit: Unit; children?
               {unitTitle(unit)}
             </Link>
             <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted">
-              <span>{unit.splitAt ? "Split into batches" : STAGE_LABELS[unit.stage]}</span>
-              {unit.details?.departureDate && <span>Departed {formatDate(unit.details.departureDate)}</span>}
+              <span>{unit.unloadedAt ? "Unloaded at the cold store" : whereIs(unit)}</span>
+              {unit.details?.voyage && (
+                <span>
+                  {unit.details.mode === "sea" ? "By sea" : "By air"} · {unit.details.voyage}
+                </span>
+              )}
+              {unit.details?.departureDate && <span>Departs {formatDate(unit.details.departureDate)}</span>}
               {unit.details?.quantity !== undefined && (
                 <span>
                   {unit.details.quantity} {unit.details.unit}
@@ -37,6 +45,7 @@ export function ShipmentCard({ unit, children, status }: { unit: Unit; children?
                   ≤ {unit.thresholdC} °C · {unit.graceMinutes} min grace
                 </span>
               )}
+              {unit.sensorId && <span className="font-mono text-xs leading-5">Sensor {unit.sensorId}</span>}
             </div>
           </div>
         </div>
@@ -45,7 +54,7 @@ export function ShipmentCard({ unit, children, status }: { unit: Unit; children?
           {unit.pendingTo && <Badge tone="warn">Handover pending</Badge>}
         </div>
       </div>
-      {unit.custodian && !unit.splitAt && (
+      {unit.custodian && !unit.unloadedAt && (
         <div className="mt-3 text-sm">
           <span className="text-muted">Held by </span>
           <Party wallet={unit.custodian} inline />

@@ -32,15 +32,15 @@ export function CertificatePanel({ batchId, buyer, inspector }: { batchId: numbe
   const canDecide = isInspector && !!data.certificate && openClaims === 0 && !data.decision;
   const canAcknowledge = isBuyer && !!data.decision && !data.acknowledgement;
 
-  // What's still holding the certificate up: a handover not done yet, or (legs 1-4) a sensor log
-  // its custodian hasn't uploaded, or one that didn't match the sensor.
+  // What's still holding the certificate up: a handover not signed in yet, or a stage whose sensor
+  // readings haven't been committed and verified yet (a few seconds after the handover).
   const missing = data.certificate
     ? []
     : data.stages.flatMap((st) =>
         !st.checkpointDone
           ? [`the ${HANDOVER_NAMES[st.stage]} handover`]
-          : st.stage > 0 && !st.sensorDone
-            ? [`the leg ${st.stage} sensor log (${LEG_NAMES[st.stage]})`]
+          : !st.sensorDone
+            ? [`the ${LEG_NAMES[st.stage]} sensor readings`]
             : [],
       );
 
@@ -50,9 +50,9 @@ export function CertificatePanel({ batchId, buyer, inspector }: { batchId: numbe
       subtitle={
         data.certificate
           ? `Issued ${formatTime(data.certificate.issuedAt)}`
-          : `Not issued yet. Waiting for ${missing.join(", ")}.${
-              missing.some((m) => m.includes("sensor log")) ? " Custodians upload logs from the Sensor logs card on their dashboard." : ""
-            }`
+          : missing.length
+            ? `Not issued yet. Waiting for ${missing.join(", ")}.`
+            : "Every stage is in: the certificate is being issued."
       }
       action={
         <div className="flex items-center gap-2">
@@ -96,12 +96,12 @@ export function CertificatePanel({ batchId, buyer, inspector }: { batchId: numbe
               )}
               {lp && !lp.pending && (
                 <div className="mt-2 text-xs text-muted tabular-nums">
-                  Received at {lp.receiptTempC.toFixed(1)} °C
-                  {lp.leg > 0 && ` · sensor peak ${lp.maxTempC.toFixed(1)} °C`}
+                  Sensor peak {lp.maxTempC.toFixed(1)} °C · received at {lp.receiptTempC.toFixed(1)} °C
+                  {lp.gapMinutes > 0 && ` · ${lp.gapMinutes} min on the dock`}
                 </div>
               )}
               {!st.checkpointDone && <div className="mt-2 text-xs text-muted">Handover not done yet</div>}
-              {st.checkpointDone && !st.sensorDone && <div className="mt-2 text-xs text-muted">Sensor log pending</div>}
+              {st.checkpointDone && !st.sensorDone && <div className="mt-2 text-xs text-muted">Sensor readings being verified</div>}
             </li>
           );
         })}

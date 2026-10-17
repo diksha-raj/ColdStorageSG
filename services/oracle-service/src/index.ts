@@ -1,246 +1,165 @@
-// Oracle Service. Custodians upload the logger file for the leg they held; the service hashes it,
-// checks it against the sensor's own commit, and submits per-batch summaries to SensorOracle.
-// It also plays the (simulated) sensor, which commits what it recorded when each leg ends.
-import {
-  type AuthedRequest,
-  HttpError,
-  createApp,
-  db,
-  env,
-  migrate,
-  requireAuth,
-  requireRole,
-  serviceSigner,
-  start,
-  contract,
-  z,
-} from "@coldchainsg/common";
-import { ZeroAddress, ZeroHash, decodeBytes32String, encodeBytes32String, toUtf8String } from "ethers";
-import {
-  STATUS,
-  batchesFor,
-  custody,
-  legsOf,
-  rawFile,
-  recordingFor,
-  sensorOracle,
-  startSensorLoop,
-  submitUpload,
-} from "./evidence.ts";
-import { DEMO_FILES, type DemoFile, RECORDINGS, type Recording, parseAndRebase, sha256 } from "./replay.ts";
+// Oracle Service. Once a sensor has committed its readings for a stage window (via the sensor
+// gateway), the oracle fetches those readings, summarises them for each batch against the batch's
+// own limit (each batch's own entry and exit, inside a container's window), and submits the
+// summary to SensorOracle with the hash of the file it used. A different hash means the readings
+// were altered after the sensor reported, and the contract marks the stage EvidenceMismatch.
+//
+// It also serves each batch's evidence: per stage, the sensor, the readings, the summary and the
+// handover gap after it. That view is public, like the certificate it backs.
+import { HttpError, contract, createApp, db, env, migrate, requireAuth, requireRole, serviceSigner, start, z } from "@coldchainsg/common";
+import { ZeroAddress, ZeroHash, decodeBytes32String } from "ethers";
 import { schemaSql } from "./schema.ts";
+import { type Reading, parseCsv, sha256, summarize } from "./summary.ts";
 
 await migrate(schemaSql);
 
 const app = createApp();
-const asAdmin = () => contract("SensorOracle", serviceSigner(env.ADMIN_PRIVATE_KEY, "Admin"));
+const custody = () => contract("ShipmentCustody");
+const sensorOracle = () => contract("SensorOracle");
+const asOracle = () => contract("SensorOracle", serviceSigner(env.ORACLE_PRIVATE_KEY, "Oracle"));
+const GATEWAY = `http://localhost:${env.GATEWAY_PORT}`;
 
+const STAGES = [0, 1, 2, 3, 4];
+const STATUS = ["None", "Verified", "EvidenceMismatch"] as const;
 const idSchema = z.coerce.number().int().positive();
-const legSchema = z.coerce.number().int().min(1).max(4);
-const MAX_FILE_BYTES = 200_000;
 
-// ---- Sensors -------------------------------------------------------------------
-
-app.get("/sensors", requireAuth, async (_req, res) => {
-  const { rows } = await db.query("SELECT * FROM oracle.sensors ORDER BY registered_at");
-  res.json(rows);
-});
-
-/** Registers a simulated sensor. Every demo sensor reports through the one simulated device key. */
-app.post("/sensors", requireAuth, requireRole("ADMIN"), async (req, res) => {
-  const { sensorId, label } = z
-    .object({
-      sensorId: z.string().trim().min(1).max(31), // must fit in bytes32
-      label: z.string().trim().min(1).max(120),
-    })
-    .parse(req.body);
-
-  const device = await serviceSigner(env.SENSOR_PRIVATE_KEY, "Sensor").getAddress();
-  const tx = await asAdmin().registerSensor(encodeBytes32String(sensorId), device);
-  await tx.wait();
-  await db.query("INSERT INTO oracle.sensors (sensor_id, device, label, tx_hash) VALUES ($1, $2, $3, $4)", [
-    sensorId,
-    device,
-    label,
-    tx.hash,
-  ]);
-  res.status(201).json({ sensorId, device, txHash: tx.hash });
-});
-
-// ---- Legs: status, the sensor's recording, and custodian uploads -------------------------
-
-/** The leg a request refers to, normalised to the unit it's recorded on. */
-async function resolveLeg(shipmentId: number, leg: number) {
-  const window = await custody().legWindow(shipmentId, leg);
-  const recordedOn = Number(window.recordedOn);
-  return {
-    recordedOn,
-    custodian: window.custodian === ZeroAddress ? null : (window.custodian as string),
-    start: Number(window.start),
-    end: Number(window.end),
-    sensorId: decodeBytes32String(window.sensorId),
-    committedHash: (await sensorOracle().committedHash(recordedOn, leg)) as string,
-  };
+async function gateway(path: string) {
+  const res = await fetch(GATEWAY + path);
+  return res.ok ? res.json() : null;
 }
 
-async function legStatus(shipmentId: number, leg: number) {
-  const l = await resolveLeg(shipmentId, leg);
-  const evidence = [];
-  for (const batchId of await batchesFor(l.recordedOn, leg)) {
-    evidence.push({ batchId, status: STATUS[Number((await sensorOracle().getSummary(batchId, leg)).status)] });
-  }
-  const committed = l.committedHash !== ZeroHash;
-  const staged = await db.query(
-    "SELECT file_name, created_at FROM oracle.staged_uploads WHERE shipment_id = $1 AND leg = $2",
-    [l.recordedOn, leg],
-  );
-  return {
-    shipmentId: l.recordedOn,
-    containerCode: toUtf8String((await custody().getUnit(l.recordedOn)).code),
-    leg,
-    custodian: l.custodian,
-    start: l.start || null,
-    end: l.end || null,
-    sensorId: l.sensorId,
-    recording: await recordingFor(l.recordedOn, leg),
-    sensorCommitted: committed,
-    evidence,
-    // A log is owed once the leg has ended and the sensor has committed, until every batch is verified.
-    awaitingUpload: !!l.end && committed && evidence.some((e) => e.status !== "Verified") && !staged.rows[0],
-    // A log uploaded at handover, waiting to be checked when the leg ends and the sensor reports.
-    stagedUpload: staged.rows[0] ? { fileName: staged.rows[0].file_name, uploadedAt: staged.rows[0].created_at } : null,
-  };
+// ---- Summarising -------------------------------------------------------------------------
+
+type Submitted = { batchId: number; stage: number; status: string };
+let queue: Promise<unknown> = Promise.resolve();
+
+/** Runs a pass after any pass already in progress (passes never overlap). */
+function summariseOnce(): Promise<Submitted[]> {
+  const pass = queue.then(runPass);
+  queue = pass.catch(() => undefined);
+  return pass;
 }
 
-/**
- * Admins see every leg, including ones not started yet (so the demo can set what the sensor will
- * record before the leg ends). Everyone else sees the legs they held, i.e. the logs they owe.
- */
-app.get("/legs", requireAuth, async (req, res) => {
-  const { wallet, role } = req as AuthedRequest;
+async function runPass(): Promise<Submitted[]> {
   const c = custody();
+  const out: Submitted[] = [];
   const nextId = Number(await c.nextId());
-  const legs = [];
-  for (let id = 1; id < nextId; id++) {
-    const unit = await c.getUnit(id);
-    for (const leg of legsOf(Number(unit.kind))) {
-      const window = await c.legWindow(id, leg);
-      if (role !== "ADMIN" && window.custodian !== wallet) continue;
-      legs.push(await legStatus(id, leg));
+  for (let batchId = 1; batchId < nextId; batchId++) {
+    const batch = await c.getUnit(batchId);
+    if (Number(batch.kind) !== 2) continue;
+    for (const stage of STAGES) {
+      const summary = await sensorOracle().getSummary(batchId, stage);
+      if (STATUS[Number(summary.status)] === "Verified") continue;
+      const unit = Number(await c.recordedOn(batchId, stage));
+      if (unit === 0 || (await sensorOracle().committedHash(unit, stage)) === ZeroHash) continue;
+
+      const log = await gateway(`/logs/${unit}/${stage}`);
+      if (!log) continue;
+      const fileHash = sha256(log.csv);
+      // Already reported this exact file as a mismatch: wait for different readings.
+      if (STATUS[Number(summary.status)] === "EvidenceMismatch" && summary.fileHash === fileHash) continue;
+
+      const w = await c.stageWindow(batchId, stage);
+      const thresholdC = Number(batch.thresholdTenthsC) / 10;
+      const s = summarize(parseCsv(log.csv), thresholdC, Number(w.start), Number(w.end));
+      const tx = await asOracle().submitLegSummary(
+        batchId,
+        stage,
+        fileHash,
+        Math.round(s.minC * 10),
+        Math.round(s.maxC * 10),
+        s.breachMinutes,
+        s.missingMinutes,
+        s.breachStart,
+        s.breachEnd,
+      );
+      await tx.wait();
+      const status = STATUS[Number((await sensorOracle().getSummary(batchId, stage)).status)];
+      await db.query(
+        `INSERT INTO oracle.submissions (batch_id, stage, file_hash, status, threshold_c, max_c, breach_minutes, missing_minutes, tx_hash)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [batchId, stage, fileHash, status, thresholdC, s.maxC, s.breachMinutes, s.missingMinutes, tx.hash],
+      );
+      out.push({ batchId, stage, status });
     }
   }
-  res.json(legs);
+  return out;
+}
+
+function startLoop(intervalMs = 3000) {
+  const tick = async () => {
+    try {
+      for (const s of await summariseOnce()) console.log(`summary: batch ${s.batchId} stage ${s.stage} ${s.status}`);
+    } catch (err) {
+      console.error("summary pass failed:", (err as Error).message);
+    }
+    setTimeout(tick, intervalMs);
+  };
+  tick();
+}
+
+/** Runs a pass now instead of waiting for the next tick (handy in the demo and tests). */
+app.post("/sync", requireAuth, requireRole("ADMIN"), async (_req, res) => {
+  res.json({ submitted: await summariseOnce() });
 });
 
-/** Demo control: what the sensor records on a leg. Can only change until the sensor commits. */
-app.put("/legs/:shipmentId/:leg/recording", requireAuth, requireRole("ADMIN"), async (req, res) => {
-  const leg = legSchema.parse(req.params.leg);
-  const { recording } = z.object({ recording: z.enum(Object.keys(RECORDINGS) as [Recording, ...Recording[]]) }).parse(req.body);
-  const l = await resolveLeg(idSchema.parse(req.params.shipmentId), leg);
-  if (l.committedHash !== ZeroHash) throw new HttpError(409, "The sensor has already recorded this leg");
-
-  await db.query(
-    `INSERT INTO oracle.leg_recordings (shipment_id, leg, recording) VALUES ($1, $2, $3)
-     ON CONFLICT (shipment_id, leg) DO UPDATE SET recording = $3`,
-    [l.recordedOn, leg, recording],
-  );
-  res.json(await legStatus(l.recordedOn, leg));
-});
-
-app.get("/demo-files", requireAuth, (_req, res) => {
-  res.json(Object.entries(DEMO_FILES).map(([id, f]) => ({ id, label: f.label, fileName: f.file })));
-});
+// ---- Evidence view ---------------------------------------------------------------------------
 
 /**
- * The custodian who holds (or held) a leg uploads its logger file: either a demo file by name, or
- * the raw bytes of a CSV as base64 (bytes, not text, so the hash is exactly the file's).
- *
- * Normally this happens at handover, before the leg ends: the log is then staged and checked
- * against the sensor's commit as soon as the receiver accepts and the sensor reports. After the
- * leg has ended (e.g. to replace a log that didn't match) it's checked straight away.
+ * Per stage: who held the batch, entry and exit, the sensor that covered it, its readings for the
+ * batch's window (live while the stage is in progress), the on-chain summary, and the handover
+ * gap that followed. Public: the readings back a certificate anyone may verify.
  */
-app.post("/legs/:shipmentId/:leg/upload", requireAuth, async (req, res) => {
-  const { wallet } = req as AuthedRequest;
-  const leg = legSchema.parse(req.params.leg);
-  const body = z
-    .union([
-      z.object({ demoFile: z.enum(Object.keys(DEMO_FILES) as [DemoFile, ...DemoFile[]]) }),
-      z.object({ fileBase64: z.base64().max(Math.ceil(MAX_FILE_BYTES / 3) * 4), fileName: z.string().trim().min(1).max(120) }),
-    ])
-    .parse(req.body);
-
-  const l = await resolveLeg(idSchema.parse(req.params.shipmentId), leg);
-  if (!l.custodian || l.custodian !== wallet) {
-    throw new HttpError(403, "Only the custodian who held this leg can upload its sensor log");
-  }
-  const file =
-    "demoFile" in body ? rawFile(DEMO_FILES[body.demoFile].file) : Buffer.from(body.fileBase64, "base64");
-  const fileName = "demoFile" in body ? DEMO_FILES[body.demoFile].file : body.fileName;
-  try {
-    parseAndRebase(file.toString("utf8"), 0); // reject a bad CSV now, not when it's checked later
-  } catch (err) {
-    throw new HttpError(400, (err as Error).message);
-  }
-
-  const status = await legStatus(l.recordedOn, leg);
-  if (status.evidence.length > 0 && status.evidence.every((e) => e.status === "Verified")) {
-    throw new HttpError(409, "This leg's evidence is already verified");
-  }
-
-  // Leg still open (or the sensor hasn't reported yet): hold the log and check it when the leg closes.
-  if (!l.end || l.committedHash === ZeroHash) {
-    await db.query(
-      `INSERT INTO oracle.staged_uploads (shipment_id, leg, uploaded_by, file_name, raw_file) VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (shipment_id, leg) DO UPDATE SET uploaded_by = $3, file_name = $4, raw_file = $5, created_at = now()`,
-      [l.recordedOn, leg, wallet, fileName, file],
-    );
-    res.status(202).json({ shipmentId: l.recordedOn, leg, staged: true, fileName, fileHash: sha256(file) });
-    return;
-  }
-
-  let result;
-  try {
-    result = await submitUpload({
-      shipmentId: l.recordedOn,
-      leg,
-      file,
-      fileName,
-      uploadedBy: wallet,
-      legStart: l.start,
-      committedHash: l.committedHash,
-    });
-  } catch (err) {
-    if ((err as Error).message?.match(/CSV/)) throw new HttpError(400, (err as Error).message);
-    throw err;
-  }
-  res.status(201).json({ shipmentId: l.recordedOn, leg, ...result });
-});
-
-// ---- Evidence views ------------------------------------------------------------------
-
-/** On-chain evidence for every leg of a batch, plus the latest uploaded readings for charts. */
-app.get("/evidence/:batchId", requireAuth, async (req, res) => {
+app.get("/evidence/:batchId", async (req, res) => {
   const batchId = idSchema.parse(req.params.batchId);
-  const unit = await custody().getUnit(batchId);
-  if (Number(unit.kind) !== 2) throw new HttpError(404, "No such batch");
+  const c = custody();
+  if (batchId >= Number(await c.nextId())) throw new HttpError(404, "No such batch");
+  const batch = await c.getUnit(batchId);
+  if (Number(batch.kind) !== 2) throw new HttpError(404, "No such batch");
 
-  const legs = [];
-  for (const leg of [1, 2, 3, 4]) {
-    const l = await resolveLeg(batchId, leg);
-    const s = await sensorOracle().getSummary(batchId, leg);
-    const upload = await db.query(
-      `SELECT id, file_name, uploaded_by, created_at, readings FROM oracle.leg_uploads
-       WHERE shipment_id = $1 AND leg = $2 ORDER BY id DESC LIMIT 1`,
-      [l.recordedOn, leg],
-    );
-    const u = upload.rows[0];
-    legs.push({
-      leg,
-      custodian: l.custodian,
-      start: l.start || null,
-      end: l.end || null,
-      sensorId: l.sensorId,
-      committedHash: l.committedHash === ZeroHash ? null : l.committedHash,
+  const stages = [];
+  for (const stage of STAGES) {
+    const w = await c.stageWindow(batchId, stage);
+    const unit = Number(w.unit);
+    const start = Number(w.start);
+    const end = Number(w.end);
+    const onChain = unit === 0 ? null : await c.getSensor(batchId, stage);
+    const sensorId = onChain && onChain.device !== ZeroAddress ? decodeBytes32String(onChain.sensorId) : null;
+    const sensor = sensorId
+      ? ((await gateway(`/sensors/${sensorId}`)) ?? { sensorId, owner: onChain!.owner, mode: null, label: "External sensor" })
+      : null;
+
+    // Readings: the committed file once the window has closed, else the live feed so far.
+    let readings: Reading[] = [];
+    let committed = null;
+    if (unit !== 0 && start !== 0) {
+      const log = await gateway(`/logs/${unit}/${stage}`);
+      if (log) {
+        const onChainHash = await sensorOracle().committedHash(unit, stage);
+        committed = { fileHash: log.fileHash, txHash: log.txHash, matchesChain: sha256(log.csv) === onChainHash };
+        readings = parseCsv(log.csv);
+      } else if (sensor) {
+        readings = (await gateway(`/live/${unit}/${stage}`))?.readings ?? [];
+      }
+      readings = readings.filter((r) => r.at >= start && (end === 0 || r.at <= end));
+    }
+
+    const s = await sensorOracle().getSummary(batchId, stage);
+    const cp = unit === 0 ? null : await c.getCheckpoint(unit, stage);
+    // The handover closing this stage: sign-off to sign-in, unrefrigerated. None after stage 1.
+    const gap =
+      cp && Number(cp.incoming.checkedAt) !== 0 && stage !== 1
+        ? { from: Number(cp.outgoing.checkedAt), to: Number(cp.incoming.checkedAt), minutes: Number(await c.handoverGapMinutes(batchId, stage)) }
+        : null;
+
+    stages.push({
+      stage,
+      custodian: w.custodian === ZeroAddress ? null : w.custodian,
+      recordedOn: unit || null,
+      start: start || null,
+      end: end || null,
+      sensor,
+      committed,
       summary:
         Number(s.status) === 0
           ? null
@@ -250,25 +169,22 @@ app.get("/evidence/:batchId", requireAuth, async (req, res) => {
               minC: Number(s.minTenthsC) / 10,
               maxC: Number(s.maxTenthsC) / 10,
               breachMinutes: Number(s.breachMinutes),
+              missingMinutes: Number(s.missingMinutes),
               breachStart: Number(s.breachStart) || null,
               breachEnd: Number(s.breachEnd) || null,
-              submittedAt: Number(s.submittedAt),
             },
-      latestUpload: u
-        ? { id: u.id, fileName: u.file_name, uploadedBy: u.uploaded_by, uploadedAt: u.created_at, readings: u.readings }
-        : null,
+      readings,
+      gap,
     });
   }
-  res.json({ batchId, thresholdC: Number(unit.thresholdTenthsC) / 10, graceMinutes: Number(unit.graceMinutes), legs });
+
+  res.json({
+    batchId,
+    thresholdC: Number(batch.thresholdTenthsC) / 10,
+    graceMinutes: Number(batch.graceMinutes),
+    stages,
+  });
 });
 
-/** The exact uploaded file, so anyone can re-hash it and call verifyFileHash on-chain. */
-app.get("/uploads/:id/raw", requireAuth, async (req, res) => {
-  const id = idSchema.parse(req.params.id);
-  const { rows } = await db.query("SELECT file_name, raw_file FROM oracle.leg_uploads WHERE id = $1", [id]);
-  if (!rows[0]) throw new HttpError(404, "No such upload");
-  res.type("text/csv").attachment(rows[0].file_name).send(rows[0].raw_file);
-});
-
-startSensorLoop();
+startLoop();
 start(app, "oracle-service", env.ORACLE_PORT);

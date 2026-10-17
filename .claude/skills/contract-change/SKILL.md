@@ -44,12 +44,13 @@ No ABI file is copied by hand, but the code that calls the contract must match t
 
 - Find every use of what you changed: `grep -rn "<functionOrEvent>" services frontend/src frontend/e2e`.
   - ParticipantRegistry: `services/identity-service`
-  - ShipmentCustody: `services/custody-service` (`index.ts`, `quality.ts`)
-  - SensorOracle: `services/oracle-service` (`evidence.ts`, `index.ts`)
+  - ShipmentCustody: `services/custody-service` (`index.ts`, `quality.ts`) and `services/sensor-gateway` (`index.ts`: sensor windows)
+  - SensorOracle: `services/oracle-service` (`index.ts`) and `services/sensor-gateway` (`index.ts`: commits)
   - CertificateRegistry: `services/certificate-service` (`sync.ts`, `index.ts`)
   - Frontend: `sendTx("<Contract>", "<method>", …)` calls and the shapes in `frontend/src/lib/types.ts`
-- Also check `contracts/scripts/deploy.ts` (constructor arguments), `services/common/src/testing.ts`
-  (shared test fixtures such as `OK_CHECK`) and the service tests in `services/*/test/`.
+- Also check `contracts/scripts/deploy.ts` (constructor arguments), `contracts/test/fixtures.ts` (the shared
+  contract-test route), `services/common/src/testing.ts` (shared test fixtures such as `OK_CHECK`) and the
+  service tests in `services/*/test/`.
 - Typecheck what you touched, e.g. `cd services/<name>-service && ../../node_modules/.bin/tsc -p tsconfig.json`
   and `cd frontend && ../node_modules/.bin/tsc -p tsconfig.json`.
 - Done only when `npm run test:all` passes. It deploys to its own isolated chain and never touches the demo.

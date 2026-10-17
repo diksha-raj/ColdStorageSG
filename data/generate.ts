@@ -1,14 +1,16 @@
-// Generates the three demo sensor files in data/raw. Seeded, so output is byte-identical
-// on every run (and so are the SHA-256 hashes).   Run: npx tsx data/generate.ts
+// Generates the sample sensor exports in data/raw. A participant who picks "Register your sensor
+// for this supply" attaches one of these as their sensor's export (the prototype can't reach
+// real devices). Seeded, so output is byte-identical on every run.   Run: npx tsx data/generate.ts
 //
-//   compliant.csv  6 h of readings between ~1.8 and ~3.4 °C
-//   breached.csv   same leg, but a cooling failure pushes it above 4 °C for ~40 min
-//   tampered.csv   breached.csv with the excursion edited down to 3.9 °C to hide it;
-//                  it no longer matches the hash the sensor committed
+//   compliant.csv         6 h of readings between ~1.8 and ~3.4 °C
+//   breached.csv          the same 6 h, but a cooling failure pushes it above 4 °C for ~40 min
+//                         (from minute 150), peaking at 7.4 °C
+//   reefer-excursion.csv  6 h from a reefer container's controller: a defrost fault holds it at
+//                         ~6.5 °C from minute 2 to 7. Above a 4 °C limit, within an 8 °C one.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-const START = Date.UTC(2026, 9, 1, 0, 0, 0); // readings are rebased onto the real leg window at replay
+const START = Date.UTC(2026, 9, 1, 0, 0, 0); // the gateway reads an export minute by minute from registration
 const MINUTES = 360;
 const EXCURSION = { from: 150, peakAt: 170, to: 194, peakC: 7.4 };
 
@@ -35,7 +37,8 @@ function excursion(m: number, base: number) {
 }
 
 const breached = baseline.map((t, m) => excursion(m, t));
-const tampered = breached.map((t) => Math.min(t, 3.9));
+// A reefer controller's export: 6 hours, with a defrost fault holding it near 6.5 °C.
+const reefer = baseline.map((t, m) => (m >= 2 && m <= 7 ? 6.3 + random() * 0.4 : t));
 
 function toCsv(temps: number[]) {
   const rows = temps.map((t, m) => `${new Date(START + m * 60_000).toISOString()},${t.toFixed(1)}`);
@@ -46,5 +49,5 @@ const dir = join(import.meta.dirname, "raw");
 mkdirSync(dir, { recursive: true });
 writeFileSync(join(dir, "compliant.csv"), toCsv(baseline));
 writeFileSync(join(dir, "breached.csv"), toCsv(breached));
-writeFileSync(join(dir, "tampered.csv"), toCsv(tampered));
-console.log(`Wrote compliant.csv, breached.csv, tampered.csv to ${dir}`);
+writeFileSync(join(dir, "reefer-excursion.csv"), toCsv(reefer));
+console.log(`Wrote compliant.csv, breached.csv, reefer-excursion.csv to ${dir}`);

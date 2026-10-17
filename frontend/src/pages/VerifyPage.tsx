@@ -25,14 +25,16 @@ const OUTCOME_LABELS: Record<string, string> = {
 
 /** What each contract call means, in words a buyer or auditor would use. */
 const CALL_LABELS: Record<string, string> = {
-  createContainer: "Container registered",
-  addBatch: "Batch added to container",
-  recordSeal: "Seal number recorded",
-  initiateTransfer: "Handover started: sender's quality check",
-  acceptTransfer: "Handover accepted: receiver's quality check",
-  splitContainer: "Container split into batches",
-  commitFileHash: "Sensor committed its log fingerprint",
-  submitLegSummary: "Oracle checked the uploaded log",
+  createBatch: "Batch created by the supplier",
+  createContainer: "Container opened by Cargo",
+  registerSensor: "Sensor registered by its owner",
+  acceptIntoContainer: "Received into the container: receiver's check (entry)",
+  recordSeal: "Container sealed",
+  initiateTransfer: "Signed off: sender's check (exit)",
+  acceptTransfer: "Signed in: receiver's check (entry)",
+  unloadContainer: "Container unloaded at the cold store",
+  commitFileHash: "Sensor committed its readings",
+  submitLegSummary: "Oracle summarised the readings",
   openClaim: "Flagged stage sent to QA",
   issueLegPass: "Stage verdict issued",
   issueFinalCertificate: "Final certificate issued",
@@ -149,10 +151,10 @@ function Verified({ data, params }: { data: Loaded; params: URLSearchParams }) {
           <Item label="Batch / container">
             Batch #{r.batchId} · Container <span className="font-mono">{r.containerCode}</span>
           </Item>
-          <Item label="Origin seal">
+          <Item label="Container seal">
             {r.sealNumber ? (
               <>
-                <span className="font-mono">{r.sealNumber}</span> <span className="text-sm text-muted">recorded by the supplier before dispatch</span>
+                <span className="font-mono">{r.sealNumber}</span> <span className="text-sm text-muted">applied by Cargo after loading</span>
               </>
             ) : (
               "—"
