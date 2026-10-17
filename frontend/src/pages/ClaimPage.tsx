@@ -86,7 +86,7 @@ export function ClaimPage() {
           ) : (
             <Card title="Resolution">
               <p className="text-sm text-muted">
-                Waiting for the batch's QA inspector, <Party wallet={batch.inspector} inline />, to review the evidence.
+                Waiting for the batch's quality inspector, <Party wallet={batch.inspector} inline />, to review the evidence.
               </p>
             </Card>
           )}

@@ -12,6 +12,7 @@ import { Dashboard } from "./pages/Dashboard";
 import { Landing } from "./pages/Landing";
 import { Login } from "./pages/Login";
 import { ShipmentPage } from "./pages/ShipmentPage";
+import { VerifyPage } from "./pages/VerifyPage";
 
 /** Signed-in users with an approved role only; everyone else goes to the login page. */
 function RequireRole() {
@@ -24,6 +25,8 @@ function RequireRole() {
 const router = createBrowserRouter([
   { path: "/", element: <Landing /> },
   { path: "/login", element: <Login /> },
+  // Public: opened from the QR code on a printed certificate, no sign-in needed.
+  { path: "/verify/:batchId", element: <VerifyPage /> },
   {
     element: <RequireRole />,
     children: [

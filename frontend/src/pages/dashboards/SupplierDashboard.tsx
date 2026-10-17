@@ -1,4 +1,4 @@
-import { encodeBytes32String } from "ethers";
+import { encodeBytes32String, hexlify, toUtf8Bytes } from "ethers";
 import { Plus, Trash2, X } from "lucide-react";
 import { type FormEvent, useState } from "react";
 import { useAuth } from "../../auth";
@@ -9,18 +9,18 @@ import { ShipmentCard } from "../../components/ShipmentCard";
 import { ActionFeedback, Button, Card, Empty, Field, Loading, Notice, PageHeader, StatusBadge, inputClass } from "../../components/ui";
 import { api } from "../../lib/api";
 import { sendTx } from "../../lib/chain";
-import { sameAddress } from "../../lib/format";
+import { containerNumberProblem, sameAddress } from "../../lib/format";
 import { useAction, useApi } from "../../lib/hooks";
 import { useParticipants } from "../../lib/participants";
 import type { BatchCertificate, Unit } from "../../lib/types";
 
-export function ImporterDashboard() {
+export function SupplierDashboard() {
   const { session } = useAuth();
   const [creating, setCreating] = useState(false);
   const { data: units, loading, reload } = useApi<Unit[]>("custody", "/shipments", 5000);
   const { data: certs } = useApi<BatchCertificate[]>("certificate", "/certificates", 5000);
 
-  const mine = (units ?? []).filter((u) => sameAddress(u.importer, session!.wallet));
+  const mine = (units ?? []).filter((u) => sameAddress(u.supplier, session!.wallet));
   const containers = mine.filter((u) => u.kind === "container").sort((a, b) => b.id - a.id);
   const batchesOf = (id: number) => mine.filter((u) => u.kind === "batch" && u.containerId === id);
   const certOf = (id: number) => certs?.find((c) => c.batchId === id);
@@ -29,7 +29,7 @@ export function ImporterDashboard() {
     <div>
       <PageHeader
         title="Your shipments"
-        subtitle="Create a container, assign each batch to a buyer and QA inspector, then check it out to the air carrier."
+        subtitle="Create a container, assign each batch to a buyer and quality inspector, then check it out to the cargo carrier."
         action={
           !creating && (
             <Button onClick={() => setCreating(true)}>
@@ -109,6 +109,9 @@ function NewContainerForm({ onClose, onCreated }: { onClose: () => void; onCreat
   const inspectors = ofRole("INSPECTOR");
 
   const [origin, setOrigin] = useState("");
+  // Optional: the number painted on the physical container. Left blank, the contract generates one.
+  const [containerNumber, setContainerNumber] = useState("");
+  const numberProblem = containerNumber ? containerNumberProblem(containerNumber) : null;
   const [departureDate, setDepartureDate] = useState(new Date().toLocaleDateString("en-CA")) // local YYYY-MM-DD, not UTC;
   const [sensorId, setSensorId] = useState("");
   const [batches, setBatches] = useState<BatchDraft[]>([blankBatch()]);
@@ -129,6 +132,7 @@ function NewContainerForm({ onClose, onCreated }: { onClose: () => void; onCreat
       setStep(`Step 1 of ${total}: confirm the container in MetaMask`);
       const created = await sendTx("ShipmentCustody", "createContainer", [
         encodeBytes32String(pick(sensorId, sensorOptions, (o) => o.sensor_id)),
+        containerNumber ? hexlify(toUtf8Bytes(containerNumber)) : "0x" + "00".repeat(11),
       ]);
       const containerId = Number(created.events.find((ev) => ev.name === "ContainerCreated")!.args.containerId);
       await api("custody", "/containers", { body: { txHash: created.hash, origin, departureDate } });
@@ -154,7 +158,7 @@ function NewContainerForm({ onClose, onCreated }: { onClose: () => void; onCreat
   };
 
   const missing =
-    buyers.length === 0 ? "No buyers are registered yet." : inspectors.length === 0 ? "No QA inspectors are registered yet." : sensorOptions.length === 0 ? "No sensors are registered yet. Ask the admin to register one." : null;
+    buyers.length === 0 ? "No buyers are registered yet." : inspectors.length === 0 ? "No quality inspectors are registered yet." : sensorOptions.length === 0 ? "No sensors are registered yet. Ask the admin to register one." : null;
 
   return (
     <Card
@@ -173,14 +177,24 @@ function NewContainerForm({ onClose, onCreated }: { onClose: () => void; onCreat
         </div>
       )}
       <form onSubmit={onSubmit} className="space-y-6">
-        <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Field label="Container number (optional)" hint={numberProblem ?? "ISO 6346, as on the container. Leave blank to generate one."}>
+            <input
+              className={`${inputClass} font-mono uppercase ${numberProblem ? "border-fail" : ""}`}
+              value={containerNumber}
+              onChange={(e) => setContainerNumber(e.target.value.toUpperCase().replace(/\s/g, ""))}
+              placeholder="e.g. MSKU9070323"
+              maxLength={11}
+              aria-invalid={!!numberProblem}
+            />
+          </Field>
           <Field label="Origin">
             <input className={inputClass} value={origin} onChange={(e) => setOrigin(e.target.value)} placeholder="e.g. Melbourne, AU" required minLength={2} />
           </Field>
           <Field label="Departure date">
             <input className={inputClass} type="date" value={departureDate} onChange={(e) => setDepartureDate(e.target.value)} required />
           </Field>
-          <Field label="Container sensor" hint="Covers the air, airport and cold-store legs.">
+          <Field label="Container sensor" hint="Covers the cargo, freight-handling and cold-store legs.">
             <SensorSelect value={pick(sensorId, sensorOptions, (o) => o.sensor_id)} onChange={setSensorId} sensors={sensorOptions} />
           </Field>
         </div>
@@ -198,7 +212,7 @@ function NewContainerForm({ onClose, onCreated }: { onClose: () => void; onCreat
                   <input className={`${inputClass} w-20`} value={b.unit} onChange={(e) => update(i, { unit: e.target.value })} aria-label="Unit" required />
                 </div>
               </Field>
-              <Field label="Batch sensor" hint="Travels with the batch on the delivery truck.">
+              <Field label="Batch sensor" hint="Travels with the batch on the reefer truck.">
                 <SensorSelect value={pick(b.sensorId, sensorOptions, (o) => o.sensor_id)} onChange={(v) => update(i, { sensorId: v })} sensors={sensorOptions} />
               </Field>
               <Field label="Buyer">
@@ -210,7 +224,7 @@ function NewContainerForm({ onClose, onCreated }: { onClose: () => void; onCreat
                   ))}
                 </select>
               </Field>
-              <Field label="QA inspector">
+              <Field label="Quality Inspector">
                 <select className={inputClass} value={pick(b.inspector, inspectors, (o) => o.wallet)} onChange={(e) => update(i, { inspector: e.target.value })}>
                   {inspectors.map((p) => (
                     <option key={p.wallet} value={p.wallet}>
@@ -240,7 +254,7 @@ function NewContainerForm({ onClose, onCreated }: { onClose: () => void; onCreat
           <Button type="button" variant="secondary" onClick={() => setBatches((bs) => [...bs, blankBatch()])}>
             <Plus className="size-4" aria-hidden /> Add another batch
           </Button>
-          <Button type="submit" busy={submit.busy} disabled={!!missing}>
+          <Button type="submit" busy={submit.busy} disabled={!!missing || !!numberProblem}>
             Create container
           </Button>
         </div>

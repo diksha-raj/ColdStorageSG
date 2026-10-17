@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.34;
 
 import {ParticipantRegistry} from "./ParticipantRegistry.sol";
 import {SensorOracle} from "./SensorOracle.sol";
@@ -10,7 +10,7 @@ import {ShipmentCustody} from "./ShipmentCustody.sol";
 ///         it never moves money. Disputes are settled between the firms, off-platform.
 ///
 /// A batch passes through five stages, each closed by a two-sided handover checkpoint:
-///   0 Origin (importer's dispatch) · 1 Air carrier · 2 Changi handler · 3 Cold store · 4 Delivery truck
+///   0 Origin (supplier's dispatch) · 1 Air carrier · 2 Changi handler · 3 Cold store · 4 Delivery truck
 /// Legs 1-4 also carry an independent sensor log (SensorOracle).
 ///
 /// A stage is flagged, permanently, when any of these hold (checked against the batch's own limits):
@@ -163,9 +163,9 @@ contract CertificateRegistry {
         return custody.getCheckpoint(leg <= 2 ? batch.containerId : batchId, leg);
     }
 
-    /// @notice Who held the batch during a stage: the importer at origin, else the leg's custodian.
+    /// @notice Who held the batch during a stage: the supplier at origin, else the leg's custodian.
     function custodianOf(uint256 batchId, uint8 leg) public view returns (address) {
-        if (leg == 0) return custody.getUnit(batchId).importer;
+        if (leg == 0) return custody.getUnit(batchId).supplier;
         (address custodian,,,,) = custody.legWindow(batchId, leg);
         return custodian;
     }

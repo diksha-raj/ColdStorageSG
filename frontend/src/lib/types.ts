@@ -7,12 +7,14 @@ export type Unit = {
   id: number;
   kind: "container" | "batch";
   containerId: number;
-  importer: string;
+  supplier: string;
   custodian: string | null;
   pendingTo: string | null;
   stage: string;
   splitAt: number | null;
   sensorId: string;
+  containerCode: string; // ISO 6346, e.g. CCSU4831207; a batch carries its container's
+  sealNumber: string | null; // the supplier's seal, recorded before dispatch
   buyer?: string;
   inspector?: string;
   thresholdC?: number;
@@ -133,6 +135,7 @@ export type Evidence = {
 /** A custody leg's evidence status, from the Oracle Service. */
 export type LegStatus = {
   shipmentId: number; // container for legs 1-3, batch for leg 4
+  containerCode: string;
   leg: number;
   custodian: string | null;
   start: number | null;
@@ -142,6 +145,7 @@ export type LegStatus = {
   sensorCommitted: boolean;
   evidence: { batchId: number; status: "None" | "Verified" | "EvidenceMismatch" }[];
   awaitingUpload: boolean;
+  stagedUpload: { fileName: string; uploadedAt: string } | null; // uploaded at handover, checked when the leg closes
 };
 
 export type UploadResult = {

@@ -15,7 +15,7 @@ import {
   start,
   z,
 } from "@coldchainsg/common";
-import { decodeBytes32String } from "ethers";
+import { ZeroHash, decodeBytes32String, toUtf8String } from "ethers";
 import { checkpointsFor, pendingCheckFor, registerQualityRoutes } from "./quality.ts";
 import { qualitySchemaSql, schemaSql } from "./schema.ts";
 
@@ -37,12 +37,15 @@ function toUnitView(id: number, u: any) {
     id,
     kind: isBatch ? "batch" : "container",
     containerId: Number(u.containerId),
-    importer: u.importer,
+    supplier: u.supplier,
     custodian: u.custodian === "0x0000000000000000000000000000000000000000" ? null : u.custodian,
     pendingTo: u.pendingTo === "0x0000000000000000000000000000000000000000" ? null : u.pendingTo,
     stage: STAGES[Number(u.stage)],
     splitAt: Number(u.splitAt) || null,
     sensorId: decodeBytes32String(u.sensorId),
+    containerCode: toUtf8String(u.code), // ISO 6346; a batch shows its container's
+    // The supplier's seal, recorded before dispatch. A batch's is filled in from its container.
+    sealNumber: u.sealNumber === ZeroHash ? null : decodeBytes32String(u.sealNumber),
     ...(isBatch && {
       buyer: u.buyer,
       inspector: u.inspector,
@@ -79,14 +82,14 @@ async function withMetadata(units: UnitView[]) {
 
 function involves(u: UnitView, wallet: string) {
   const w = wallet.toLowerCase();
-  return [u.importer, u.custodian, u.pendingTo, (u as any).buyer, (u as any).inspector].some(
+  return [u.supplier, u.custodian, u.pendingTo, (u as any).buyer, (u as any).inspector].some(
     (a) => a?.toLowerCase() === w,
   );
 }
 
 // ---- Metadata for transactions sent from MetaMask ---------------------------------
 
-app.post("/containers", requireAuth, requireRole("IMPORTER"), async (req, res) => {
+app.post("/containers", requireAuth, requireRole("SUPPLIER"), async (req, res) => {
   const { wallet } = req as AuthedRequest;
   const body = z
     .object({
@@ -98,7 +101,7 @@ app.post("/containers", requireAuth, requireRole("IMPORTER"), async (req, res) =
 
   const event = await findEvent("ShipmentCustody", body.txHash, "ContainerCreated");
   if (!event) throw new HttpError(400, "That transaction did not create a container");
-  if (event.importer !== wallet) throw new HttpError(403, "That container belongs to another importer");
+  if (event.supplier !== wallet) throw new HttpError(403, "That container belongs to another supplier");
 
   const id = Number(event.containerId);
   await db.query(
@@ -109,7 +112,7 @@ app.post("/containers", requireAuth, requireRole("IMPORTER"), async (req, res) =
   res.status(201).json({ id });
 });
 
-app.post("/batches", requireAuth, requireRole("IMPORTER"), async (req, res) => {
+app.post("/batches", requireAuth, requireRole("SUPPLIER"), async (req, res) => {
   const { wallet } = req as AuthedRequest;
   const body = z
     .object({
@@ -124,7 +127,7 @@ app.post("/batches", requireAuth, requireRole("IMPORTER"), async (req, res) => {
   if (!event) throw new HttpError(400, "That transaction did not add a batch");
   const batchId = Number(event.batchId);
   const batch = await custody().getUnit(batchId);
-  if (batch.importer !== wallet) throw new HttpError(403, "That batch belongs to another importer");
+  if (batch.supplier !== wallet) throw new HttpError(403, "That batch belongs to another supplier");
 
   await db.query(
     `INSERT INTO custody.batches (id, container_id, product, quantity, unit, tx_hash) VALUES ($1, $2, $3, $4, $5, $6)
@@ -156,6 +159,7 @@ app.get("/shipments/:id", requireAuth, async (req, res) => {
   if (id >= Number(await c.nextId())) throw new HttpError(404, "No such shipment");
 
   const [unit] = await withMetadata([toUnitView(id, await c.getUnit(id))]);
+  if (unit.kind === "batch") unit.sealNumber = toUnitView(unit.containerId, await c.getUnit(unit.containerId)).sealNumber;
   const historyOf = async (unitId: number) =>
     (await c.getHistory(unitId)).map((h: any) => ({
       custodian: h.custodian,

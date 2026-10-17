@@ -1,4 +1,4 @@
-// The buyer's QA inspector. Two jobs:
+// The buyer's quality inspector. Two jobs:
 //   1. Rule on each flagged stage: who is responsible (upheld / overturned / compensation agreed).
 //      Claims appear here the moment a handover check fails, often while the batch is in transit.
 //   2. After delivery, make the final call on the batch: release for sale, or reject.

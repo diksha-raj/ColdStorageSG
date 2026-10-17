@@ -121,3 +121,11 @@ test("validates input", async () => {
   });
   assert.equal(bad.status, 400);
 });
+
+test("the public directory needs no sign-in and never exposes contact details", async () => {
+  const { status, body } = await call("/directory");
+  assert.equal(status, 200);
+  assert.ok(Array.isArray(body));
+  for (const row of body) assert.deepEqual(Object.keys(row).sort(), ["active", "org_name", "role", "wallet"]);
+  assert.ok(!JSON.stringify(body).includes("@"), "no email addresses");
+});

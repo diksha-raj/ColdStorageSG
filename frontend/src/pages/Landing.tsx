@@ -11,7 +11,7 @@ const STEPS = [
   {
     Icon: Wallet,
     title: "Join with your wallet",
-    body: "Importers, carriers, handlers, cold stores, trucks, buyers and QA inspectors sign in with MetaMask. The admin approves each firm and its role on-chain.",
+    body: "Suppliers, carriers, handlers, cold stores, trucks, buyers and quality inspectors sign in with MetaMask. The admin approves each firm and its role on-chain.",
   },
   {
     Icon: Repeat2,
@@ -103,7 +103,7 @@ export function Landing() {
             When chilled food arrives warm, know exactly where it went wrong.
           </h1>
           <p className="mx-auto mt-5 max-w-2xl text-lg text-muted">
-            ColdChainSG seals temperature evidence at every handover, from air freight to the buyer's door, so the firms
+            ColdChainSG seals temperature evidence at every handover, from the origin port or airport to the buyer's door, so the firms
             involved can settle disputes from one shared, verifiable record.
           </p>
           <div className="mt-8 flex flex-wrap justify-center gap-3">

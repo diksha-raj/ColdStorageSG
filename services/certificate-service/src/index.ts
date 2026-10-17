@@ -154,7 +154,7 @@ async function visibleBatchIds(wallet: string, role: string | null) {
   for (let id = 1; id < nextId; id++) {
     const u = await cust.getUnit(id);
     if (Number(u.kind) !== 2) continue;
-    if (role === "ADMIN" || [u.importer, u.buyer, u.inspector].includes(wallet)) ids.push(id);
+    if (role === "ADMIN" || [u.supplier, u.buyer, u.inspector].includes(wallet)) ids.push(id);
   }
   return ids;
 }
@@ -175,7 +175,7 @@ app.get("/certificates/:batchId", requireAuth, async (req, res) => {
 });
 
 /**
- * Claims the caller is involved in: as the batch's importer, buyer or inspector, or as the
+ * Claims the caller is involved in: as the batch's supplier, buyer or inspector, or as the
  * provisional custodian the claim is tagged to. ?status=open|resolved filters.
  */
 app.get("/claims", requireAuth, async (req, res) => {

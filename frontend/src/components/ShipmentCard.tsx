@@ -6,7 +6,7 @@ import type { Unit } from "../lib/types";
 import { Badge, Party } from "./ui";
 
 export function unitTitle(u: Unit) {
-  if (u.kind === "container") return `Container #${u.id}${u.details?.origin ? ` from ${u.details.origin}` : ""}`;
+  if (u.kind === "container") return `Container ${u.containerCode}${u.details?.origin ? ` from ${u.details.origin}` : ""}`;
   return `Batch #${u.id}${u.details?.product ? ` · ${u.details.product}` : ""}`;
 }
 

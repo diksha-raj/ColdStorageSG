@@ -8,3 +8,4 @@ contracts/types/
 deployments/localhost.json
 frontend/e2e/screenshots/
 deployments/e2e.json
+.logs/

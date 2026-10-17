@@ -70,3 +70,52 @@ Confirmed with the project owner.
 | 30 | What flags a stage? | Any of: receipt temperature above the batch's limit; sender's plus handover unrefrigerated minutes above the grace period; damage, a broken seal, *Accept with issues*, or issues the sender reported. The sensor log (kept, see #23–26) adds a fourth reason: an excursion longer than the grace period. A sender-vs-receiver temperature gap is **shown but doesn't flag**. Flags are computed on-chain per batch, using each batch's own limit and grace period. |
 | 31 | When do claims open? | **As soon as a stage is flagged.** For a checkpoint flag that's at the handover, while the batch is still in transit. For a sensor flag, it's when the log is verified. The claim is tagged to whoever held the batch on that stage (the importer at Origin). |
 | 32 | What does QA do? | **Two jobs.** (1) Rule on each flagged stage, as soon as it's flagged: upheld, overturned, or compensation agreed. (2) After the final certificate, once every flagged stage has a ruling, sign a **disposition** for the batch: *Release for sale* or *Reject*, with a reason. The buyer can only acknowledge receipt after the disposition, which closes the batch. |
+
+## Changed on 2026-10-15: sensor logs are uploaded at handover
+
+Requested by the project owner. Replaces the timing in #23 ("after handing over"). No contract change.
+
+| # | Question | Decision |
+| --- | --- | --- |
+| 33 | When does a custodian upload their leg's sensor log? | **At the handover that ends their leg, before handing over:** upload the log, then hand over. The carrier, handler and truck pick it in the "Check & hand over" form (legs 1, 2, 4). The cold store picks it in **Upload log & split**, since the split ends leg 3. The log is held off-chain (`oracle.staged_uploads`) and checked against the sensor's commit automatically once the receiver accepts and the sensor reports. A mismatch then shows on the sender's Sensor logs card, where they can upload the genuine log, which is checked straight away. |
+
+## Changed on 2026-10-16: Solidity version pinned
+
+Requested by the project owner. No change in behaviour or ABI.
+
+| # | Question | Decision |
+| --- | --- | --- |
+| 34 | Which compiler versions may the contracts be built with? | **Exactly 0.8.34**, the version in `hardhat.config.ts`. All four contracts declare `pragma solidity 0.8.34;` instead of the floating `^0.8.24`, so the bytecode tested and deployed can only come from that compiler. `contracts/test/Pragma.ts` fails if a contract's pragma ever drifts from the configured compiler. Slither had no finding to accept: its version warnings were only for OpenZeppelin's files, which the check excludes. The deployed demo contracts behave identically, so they weren't redeployed. |
+
+## Changed on 2026-10-16: public certificate verification
+
+Requested and confirmed by the project owner. No contract change.
+
+| # | Question | Decision |
+| --- | --- | --- |
+| 35 | How can someone holding a printed certificate check it's genuine? | **Scan its QR code.** It opens a public page, `/verify/<batchId>`, with no sign-in. The page reads the certificate, stage verdicts, QA rulings and decision, buyer's acknowledgement, and **every transaction that touched the batch, its container or its claims** straight from the chain node, not through the services. Each transaction shows who signed it, the decoded call, its events and its receipt. The QR link carries the chain id and CertificateRegistry address the certificate was printed from, and the page warns if it's reading a different one. Wallets are labelled with organisation name and role from a public `GET /directory` (identity service), which never returns contact details. The printed certificate also shows the transaction that issued it. On the local chain the link only works on the machine running the demo. |
+
+## Changed on 2026-10-16: container numbers and seal numbers
+
+Requested by the project owner; format and seal handling chosen by them. Contract change (`ShipmentCustody`), so the demo chain must be redeployed.
+
+| # | Question | Decision |
+| --- | --- | --- |
+| 36 | What identifies a container? | **An 11-character ISO 6346 number.** The importer may type the physical container's number when creating it (`createContainer(sensorId, code)`); the contract checks the format (three-letter owner code, category `U`, six digits) and the check digit, and rejects a typo. Real containers are reused, so a number is blocked only while another shipment with it is active, i.e. until that container is split at the cold store (`activeContainerByCode`). Owner code `CCS` is reserved for generated numbers, so a typed number can't collide with one. **If the importer leaves it blank, it's generated on-chain**: owner code `CCS`, category `U`, a six-digit serial and the standard check digit (e.g. `CCSU1126480`). The serial is the internal id through a fixed permutation of 0–999,999 (`(id × 7919 + 104729) mod 10⁶`; 7919 is coprime with 10⁶), so numbers are unique without extra storage and don't look sequential. It's stored as `Unit.code`, emitted in `ContainerCreated`, and copied to each batch. The numeric id stays the internal key, as real containers are reused across trips. Batches keep their `Batch #N` label. The contract test checks the check digit against an independent ISO 6346 implementation and published examples. |
+| 37 | Who records the seal number, and when? | **The importer, at stage 0, before dispatch** (in reality the shipper applies the seal after loading; our supplier is off-platform, so the importer acts for them). `recordSeal(containerId, sealNumber)` stores it on the container; it can be corrected until the carrier transfer is initiated and is then fixed. `initiateTransfer` at origin requires it. Receivers don't re-enter the number: they keep the *Seal intact* tick box (#27, #30), with the recorded number shown to compare against. The certificate and the public verify page show the seal number and whether it was reported intact at each container handover until the cold store opened it for the split. No truck seal is recorded for leg 4. Slither: two `timestamp` findings on `recordSeal` and `initiateTransfer` accepted into the baseline. They're the same false positive as the existing ones (the detector flags any comparison in a function that touches a struct holding timestamps); no comparison involves a timestamp. |
+
+## Changed on 2026-10-16: "Importer" renamed to "Supplier"
+
+Requested by the project owner. A rename only: the role does exactly what it did before. Contract change (role constant, field and event names), so the demo chain must be redeployed.
+
+| # | Question | Decision |
+| --- | --- | --- |
+| 38 | What is the party that creates containers and dispatches them called? | **Supplier.** The `IMPORTER` role is now `SUPPLIER` everywhere: the on-chain role (`keccak256("SUPPLIER")`), `Unit.supplier`, event arguments, error messages, services, frontend and seed (organisation "Merlion Fresh Supplies"). The cold store's label drops its owner and is just **Cold store** (role `COLD_STORE` unchanged). Nothing else changes: the supplier creates the container and batches, assigns buyers, records the seal and dispatches at stage 0, and stage 0 claims are tagged to the supplier. "Importer" in `docs/brief.md` and in decisions #1–37 now means this supplier role; those texts are left as written. |
+
+## Changed on 2026-10-17: mode-neutral stage labels
+
+Requested by the project owner, so the app isn't tied to air freight: a shipment may go by air or sea. Labels only; no contract, role or flow change.
+
+| # | Question | Decision |
+| --- | --- | --- |
+| 39 | What are the parties and stages called in the app? | **Supplier → Cargo → Destination Freight Handler → Cold Store → Reefer Truck → Buyer, with the Quality Inspector** (previously Air carrier, Changi handler, Cold store, Delivery truck, QA inspector). The roles behind them are unchanged (`CARRIER`, `HANDLER`, `COLD_STORE`, `TRUCK`, `INSPECTOR`), as are the stage enum names in the contracts. Air-specific wording ("in flight", "Changi", plane icons) is replaced with neutral wording. The demo organisation "Equator Air Cargo" keeps its name. "Air carrier" and "Changi handler" in `docs/brief.md` and decisions #1–38 mean the Cargo and Destination Freight Handler roles. |

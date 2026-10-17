@@ -7,64 +7,64 @@ const role = (name: string) => ethers.id(name);
 
 describe("ParticipantRegistry", function () {
   async function deploy() {
-    const [admin, importer, stranger] = await ethers.getSigners();
+    const [admin, supplier, stranger] = await ethers.getSigners();
     const registry = await ethers.deployContract("ParticipantRegistry", [admin.address]);
-    return { registry, admin, importer, stranger };
+    return { registry, admin, supplier, stranger };
   }
 
   it("lets the admin register a participant with a role", async function () {
-    const { registry, importer } = await deploy();
+    const { registry, supplier } = await deploy();
 
-    await expect(registry.registerParticipant(importer.address, role("IMPORTER")))
+    await expect(registry.registerParticipant(supplier.address, role("SUPPLIER")))
       .to.emit(registry, "ParticipantRegistered")
-      .withArgs(importer.address, role("IMPORTER"));
+      .withArgs(supplier.address, role("SUPPLIER"));
 
-    expect(await registry.hasRole(role("IMPORTER"), importer.address)).to.equal(true);
-    expect(await registry.roleOf(importer.address)).to.equal(role("IMPORTER"));
+    expect(await registry.hasRole(role("SUPPLIER"), supplier.address)).to.equal(true);
+    expect(await registry.roleOf(supplier.address)).to.equal(role("SUPPLIER"));
   });
 
   it("rejects registration from a non-admin", async function () {
-    const { registry, importer, stranger } = await deploy();
+    const { registry, supplier, stranger } = await deploy();
 
     await expect(
-      registry.connect(stranger).registerParticipant(importer.address, role("IMPORTER")),
+      registry.connect(stranger).registerParticipant(supplier.address, role("SUPPLIER")),
     ).to.be.revertedWithCustomError(registry, "AccessControlUnauthorizedAccount");
   });
 
   it("rejects unknown roles and double registration", async function () {
-    const { registry, importer } = await deploy();
+    const { registry, supplier } = await deploy();
 
-    await expect(registry.registerParticipant(importer.address, role("PIRATE"))).to.be.revertedWith("unknown role");
+    await expect(registry.registerParticipant(supplier.address, role("PIRATE"))).to.be.revertedWith("unknown role");
 
-    await registry.registerParticipant(importer.address, role("IMPORTER"));
-    await expect(registry.registerParticipant(importer.address, role("BUYER"))).to.be.revertedWith(
+    await registry.registerParticipant(supplier.address, role("SUPPLIER"));
+    await expect(registry.registerParticipant(supplier.address, role("BUYER"))).to.be.revertedWith(
       "already registered",
     );
   });
 
   it("suspending removes the role", async function () {
-    const { registry, importer } = await deploy();
-    await registry.registerParticipant(importer.address, role("IMPORTER"));
+    const { registry, supplier } = await deploy();
+    await registry.registerParticipant(supplier.address, role("SUPPLIER"));
 
-    await registry.suspendParticipant(importer.address);
+    await registry.suspendParticipant(supplier.address);
 
-    expect(await registry.hasRole(role("IMPORTER"), importer.address)).to.equal(false);
-    expect(await registry.roleOf(importer.address)).to.equal(ethers.ZeroHash);
+    expect(await registry.hasRole(role("SUPPLIER"), supplier.address)).to.equal(false);
+    expect(await registry.roleOf(supplier.address)).to.equal(ethers.ZeroHash);
   });
 
   it("blocks direct grantRole / revokeRole / renounceRole", async function () {
-    const { registry, importer } = await deploy();
-    await registry.registerParticipant(importer.address, role("IMPORTER"));
+    const { registry, supplier } = await deploy();
+    await registry.registerParticipant(supplier.address, role("SUPPLIER"));
 
-    await expect(registry.grantRole(role("BUYER"), importer.address)).to.be.revertedWith("use registerParticipant");
-    await expect(registry.revokeRole(role("IMPORTER"), importer.address)).to.be.revertedWith("use suspendParticipant");
+    await expect(registry.grantRole(role("BUYER"), supplier.address)).to.be.revertedWith("use registerParticipant");
+    await expect(registry.revokeRole(role("SUPPLIER"), supplier.address)).to.be.revertedWith("use suspendParticipant");
     await expect(
-      registry.connect(importer).renounceRole(role("IMPORTER"), importer.address),
+      registry.connect(supplier).renounceRole(role("SUPPLIER"), supplier.address),
     ).to.be.revertedWith("ask the admin to suspend");
   });
 
   it("admin can pause; registration is blocked while paused", async function () {
-    const { registry, importer, stranger } = await deploy();
+    const { registry, supplier, stranger } = await deploy();
 
     await expect(registry.connect(stranger).pause()).to.be.revertedWithCustomError(
       registry,
@@ -73,12 +73,12 @@ describe("ParticipantRegistry", function () {
 
     await registry.pause();
     expect(await registry.paused()).to.equal(true);
-    await expect(registry.registerParticipant(importer.address, role("IMPORTER"))).to.be.revertedWithCustomError(
+    await expect(registry.registerParticipant(supplier.address, role("SUPPLIER"))).to.be.revertedWithCustomError(
       registry,
       "EnforcedPause",
     );
 
     await registry.unpause();
-    await registry.registerParticipant(importer.address, role("IMPORTER"));
+    await registry.registerParticipant(supplier.address, role("SUPPLIER"));
   });
 });

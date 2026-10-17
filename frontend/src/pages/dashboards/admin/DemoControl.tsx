@@ -33,7 +33,7 @@ export function DemoControl() {
         subtitle="Stands in for real hardware. Set a leg to Breach before it ends: the sensor commits its recording automatically at the handover, then the custodian uploads their log, which must match."
       >
         {groups.size === 0 ? (
-          <Empty>No shipments yet. Once the importer creates a container, its legs appear here.</Empty>
+          <Empty>No shipments yet. Once the supplier creates a container, its legs appear here.</Empty>
         ) : (
           <div className="space-y-6">
             {[...groups.entries()].map(([id, rows]) => (

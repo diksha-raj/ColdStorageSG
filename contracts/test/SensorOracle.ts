@@ -17,7 +17,7 @@ const Status = { None: 0n, Verified: 1n, EvidenceMismatch: 2n };
 describe("SensorOracle", function () {
   /** Container 1 with batch 2, moved to the carrier (leg 1 in progress). */
   async function deploy() {
-    const [admin, oracle, device, importer, carrier, handler, coldStore, truck, buyer, inspector, stranger] =
+    const [admin, oracle, device, supplier, carrier, handler, coldStore, truck, buyer, inspector, stranger] =
       await ethers.getSigners();
     const registry = await ethers.deployContract("ParticipantRegistry", [admin.address]);
     const custody = await ethers.deployContract("ShipmentCustody", [await registry.getAddress()]);
@@ -28,7 +28,7 @@ describe("SensorOracle", function () {
 
     for (const [s, r] of [
       [oracle, "ORACLE"],
-      [importer, "IMPORTER"],
+      [supplier, "SUPPLIER"],
       [carrier, "CARRIER"],
       [handler, "HANDLER"],
       [coldStore, "COLD_STORE"],
@@ -41,9 +41,10 @@ describe("SensorOracle", function () {
     await sensors.registerSensor(CTR_SENSOR, device.address);
     await sensors.registerSensor(BATCH_SENSOR, device.address);
 
-    await custody.connect(importer).createContainer(CTR_SENSOR);
-    await custody.connect(importer).addBatch(1, buyer.address, inspector.address, 40, 15, BATCH_SENSOR);
-    await custody.connect(importer).initiateTransfer(1, carrier.address, OK);
+    await custody.connect(supplier).createContainer(CTR_SENSOR, "0x" + "00".repeat(11));
+    await custody.connect(supplier).addBatch(1, buyer.address, inspector.address, 40, 15, BATCH_SENSOR);
+    await custody.connect(supplier).recordSeal(1, ethers.encodeBytes32String("SGB4471203"));
+    await custody.connect(supplier).initiateTransfer(1, carrier.address, OK);
     await custody.connect(carrier).acceptTransfer(1, OK);
 
     /** Ends leg 1 by handing the container to the handler. */

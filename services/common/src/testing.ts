@@ -1,6 +1,6 @@
 // Helpers for the end-to-end service tests. They need the local chain, a deployment,
 // and the identity service running. Each test creates fresh wallets so runs don't collide.
-import { type BaseWallet, Contract, type Provider, Wallet, parseEther } from "ethers";
+import { type BaseWallet, Contract, type Provider, Wallet, encodeBytes32String, parseEther } from "ethers";
 import { SiweMessage } from "siwe";
 import { TxSigner, getDeployment, provider, roleHash, type Role } from "./chain.ts";
 
@@ -58,6 +58,12 @@ export async function persona(role: Exclude<Role, "ADMIN" | "ORACLE" | "CERTIFIE
 }
 
 export const adminToken = () => signIn(new Wallet(env.ADMIN_PRIVATE_KEY!));
+
+/** createContainer's container-number argument when the contract should generate one. */
+export const AUTO_NUMBER = "0x" + "00".repeat(11);
+
+/** The seal number the supplier records before dispatch (required by initiateTransfer at origin). */
+export const SEAL = encodeBytes32String("SGB4471203");
 
 /** A passing handover quality check: 3.0 °C, nothing unrefrigerated, sealed, no issues. */
 export const OK_CHECK = {

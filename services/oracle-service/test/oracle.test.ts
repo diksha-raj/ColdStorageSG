@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { before, test } from "node:test";
 import { adminToken, api, deployed, persona, provider } from "@coldchainsg/common/testing";
-import { OK_CHECK } from "@coldchainsg/common/testing";
+import { AUTO_NUMBER, OK_CHECK, SEAL } from "@coldchainsg/common/testing";
 import { encodeBytes32String } from "ethers";
 import { sha256 } from "../src/replay.ts";
 
@@ -43,7 +43,7 @@ async function waitForSensor(shipmentId: number, leg: number) {
 before(async () => {
   p = {};
   for (const [name, role] of [
-    ["importer", "IMPORTER"],
+    ["supplier", "SUPPLIER"],
     ["carrier", "CARRIER"],
     ["handler", "HANDLER"],
     ["coldStore", "COLD_STORE"],
@@ -61,7 +61,7 @@ test("admin registers sensors; non-admins cannot", async () => {
     const res = await call("/sensors", { token: admin, body: { sensorId, label: `Logger ${key}` } });
     assert.equal(res.status, 201, JSON.stringify(res.body));
   }
-  const denied = await call("/sensors", { token: p.importer.token, body: { sensorId: `X-${run}`, label: "x" } });
+  const denied = await call("/sensors", { token: p.supplier.token, body: { sensorId: `X-${run}`, label: "x" } });
   assert.equal(denied.status, 403);
   const duplicate = await call("/sensors", { token: admin, body: { sensorId: SENSORS.container, label: "again" } });
   assert.equal(duplicate.status, 400);
@@ -69,15 +69,15 @@ test("admin registers sensors; non-admins cannot", async () => {
 
 test("container with a 4 °C and an 8 °C batch; admin sets legs 2 and 3 to record a breach", async () => {
   containerId = Number(await deployed("ShipmentCustody", provider).nextId());
-  await send("importer", "createContainer", encodeBytes32String(SENSORS.container));
+  await send("supplier", "createContainer", encodeBytes32String(SENSORS.container), AUTO_NUMBER);
   coldBatch = containerId + 1;
   warmBatch = containerId + 2;
-  await send("importer", "addBatch", containerId, p.buyer.address, p.inspector.address, 40, 15, encodeBytes32String(SENSORS.cold));
-  await send("importer", "addBatch", containerId, p.buyer.address, p.inspector.address, 80, 15, encodeBytes32String(SENSORS.warm));
+  await send("supplier", "addBatch", containerId, p.buyer.address, p.inspector.address, 40, 15, encodeBytes32String(SENSORS.cold));
+  await send("supplier", "addBatch", containerId, p.buyer.address, p.inspector.address, 80, 15, encodeBytes32String(SENSORS.warm));
 
   assert.equal((await setRecording(containerId, 2, "breach")).status, 200);
   assert.equal((await setRecording(containerId, 3, "breach")).status, 200);
-  assert.equal((await call(`/legs/${containerId}/2/recording`, { method: "PUT", token: p.importer.token, body: { recording: "compliant" } })).status, 403);
+  assert.equal((await call(`/legs/${containerId}/2/recording`, { method: "PUT", token: p.supplier.token, body: { recording: "compliant" } })).status, 403);
 
   const legs = (await call("/legs", { token: admin })).body.filter((l: any) => l.shipmentId === containerId);
   assert.deepEqual(
@@ -90,35 +90,41 @@ test("container with a 4 °C and an 8 °C batch; admin sets legs 2 and 3 to reco
   );
 });
 
-test("leg 1: no upload until the leg ends; then only its custodian can upload", async () => {
-  await send("importer", "initiateTransfer", containerId, p.carrier.address, OK_CHECK);
+test("leg 1: the carrier uploads its log at handover; it's checked once the handler accepts", async () => {
+  await send("supplier", "recordSeal", containerId, SEAL);
+  await send("supplier", "initiateTransfer", containerId, p.carrier.address, OK_CHECK);
   await send("carrier", "acceptTransfer", containerId, OK_CHECK);
-  const early = await upload("carrier", containerId, 1, { demoFile: "compliant" });
-  assert.equal(early.status, 409, "leg 1 still in progress");
 
-  await send("carrier", "initiateTransfer", containerId, p.handler.address, OK_CHECK);
-  await send("handler", "acceptTransfer", containerId, OK_CHECK);
-  await waitForSensor(containerId, 1);
+  // While the leg is still open, the upload is held, not checked.
+  const staged = await upload("carrier", containerId, 1, { demoFile: "compliant" });
+  assert.equal(staged.status, 202, JSON.stringify(staged.body));
+  assert.equal(staged.body.staged, true);
+  assert.equal((await upload("handler", containerId, 1, { demoFile: "compliant" })).status, 403, "not the leg's custodian");
+  const bad = await upload("carrier", containerId, 1, { fileBase64: Buffer.from("hello").toString("base64"), fileName: "x.csv" });
+  assert.equal(bad.status, 400, "a bad CSV is rejected at upload, not later");
 
   const mine = (await call("/legs", { token: p.carrier.token })).body;
   assert.deepEqual(
-    mine.map((l: any) => [l.shipmentId, l.leg, l.awaitingUpload]),
-    [[containerId, 1, true]],
-    "the carrier sees the log it owes",
+    mine.map((l: any) => [l.shipmentId, l.leg, l.stagedUpload?.fileName]),
+    [[containerId, 1, "compliant.csv"]],
+    "the carrier sees its log waiting to be checked",
   );
 
-  assert.equal((await upload("handler", containerId, 1, { demoFile: "compliant" })).status, 403, "not the leg's custodian");
+  // The handover ends the leg: the sensor commits, and the held log is checked automatically.
+  await send("carrier", "initiateTransfer", containerId, p.handler.address, OK_CHECK);
+  await send("handler", "acceptTransfer", containerId, OK_CHECK);
+  await waitForSensor(containerId, 1);
+  const oracle = deployed("SensorOracle", provider);
+  for (let i = 0; i < 40; i++) {
+    const statuses = await Promise.all([coldBatch, warmBatch].map(async (b) => (await oracle.getSummary(b, 1)).status));
+    if (statuses.every((st) => st === 1n)) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  const after = (await call("/legs", { token: p.carrier.token })).body.find((l: any) => l.leg === 1);
+  assert.deepEqual(after.evidence.map((e: any) => e.status), ["Verified", "Verified"]);
+  assert.equal(after.stagedUpload, null);
+  assert.equal(after.awaitingUpload, false);
 
-  const res = await upload("carrier", containerId, 1, { demoFile: "compliant" });
-  assert.equal(res.status, 201, JSON.stringify(res.body));
-  assert.equal(res.body.matches, true);
-  assert.deepEqual(
-    res.body.results.map((r: any) => [r.batchId, r.status, r.breachMinutes]),
-    [
-      [coldBatch, "Verified", 0],
-      [warmBatch, "Verified", 0],
-    ],
-  );
   assert.equal((await upload("carrier", containerId, 1, { demoFile: "compliant" })).status, 409, "already verified");
 });
 

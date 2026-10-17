@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { before, test } from "node:test";
 import { api, deployed, persona } from "@coldchainsg/common/testing";
-import { OK_CHECK } from "@coldchainsg/common/testing";
+import { AUTO_NUMBER, OK_CHECK, SEAL } from "@coldchainsg/common/testing";
 import { encodeBytes32String, id as keccakText } from "ethers";
 
 const call = api(`http://localhost:${process.env.CUSTODY_PORT ?? 4002}`);
@@ -23,8 +23,8 @@ const send = async (who: string, fn: string, ...args: unknown[]) => {
 before(async () => {
   p = {};
   for (const [name, role] of [
-    ["importer", "IMPORTER"],
-    ["otherImporter", "IMPORTER"],
+    ["supplier", "SUPPLIER"],
+    ["otherSupplier", "SUPPLIER"],
     ["carrier", "CARRIER"],
     ["handler", "HANDLER"],
     ["coldStore", "COLD_STORE"],
@@ -37,18 +37,18 @@ before(async () => {
   }
 });
 
-test("importer creates a container and batches, then records their details", async () => {
-  const createHash = await send("importer", "createContainer", sensor("SENS-CTR-7"));
+test("supplier creates a container and batches, then records their details", async () => {
+  const createHash = await send("supplier", "createContainer", sensor("SENS-CTR-7"), AUTO_NUMBER);
 
-  // Someone else can't attach metadata to this importer's container.
+  // Someone else can't attach metadata to this supplier's container.
   const hijack = await call("/containers", {
-    token: p.otherImporter.token,
+    token: p.otherSupplier.token,
     body: { txHash: createHash, origin: "Fake", departureDate: "2026-10-01" },
   });
   assert.equal(hijack.status, 403);
 
   const created = await call("/containers", {
-    token: p.importer.token,
+    token: p.supplier.token,
     body: { txHash: createHash, origin: "Melbourne, AU", departureDate: "2026-10-01" },
   });
   assert.equal(created.status, 201);
@@ -60,7 +60,7 @@ test("importer creates a container and batches, then records their details", asy
     ["buyerB", "Fresh dairy"],
   ]) {
     const hash = await send(
-      "importer",
+      "supplier",
       "addBatch",
       containerId,
       p[buyer].address,
@@ -69,16 +69,16 @@ test("importer creates a container and batches, then records their details", asy
       15,
       sensor(`SENS-${product.slice(0, 6)}`),
     );
-    const res = await call("/batches", { token: p.importer.token, body: { txHash: hash, product, quantity: 500 } });
+    const res = await call("/batches", { token: p.supplier.token, body: { txHash: hash, product, quantity: 500 } });
     assert.equal(res.status, 201);
     batchIds.push(res.body.id);
   }
 
   // A tx hash for the wrong event is rejected.
-  const wrong = await call("/batches", { token: p.importer.token, body: { txHash: createHash, product: "X", quantity: 1 } });
+  const wrong = await call("/batches", { token: p.supplier.token, body: { txHash: createHash, product: "X", quantity: 1 } });
   assert.equal(wrong.status, 400);
 
-  const view = await call(`/shipments/${containerId}`, { token: p.importer.token });
+  const view = await call(`/shipments/${containerId}`, { token: p.supplier.token });
   assert.equal(view.body.stage, "Origin");
   assert.equal(view.body.details.origin, "Melbourne, AU");
   assert.equal(view.body.sensorId, "SENS-CTR-7");
@@ -92,8 +92,12 @@ test("importer creates a container and batches, then records their details", asy
 });
 
 test("container moves carrier → handler → cold store with two-step handovers", async () => {
+  await send("supplier", "recordSeal", containerId, SEAL);
+  const sealed = await call(`/shipments/${containerId}`, { token: p.supplier.token });
+  assert.match(sealed.body.containerCode, /^CCSU\d{7}$/);
+  assert.equal(sealed.body.sealNumber, "SGB4471203");
   for (const [from, to, stage] of [
-    ["importer", "carrier", "Carrier"],
+    ["supplier", "carrier", "Carrier"],
     ["carrier", "handler", "Handler"],
     ["handler", "coldStore", "ColdStore"],
   ]) {
@@ -147,7 +151,7 @@ test("each participant only sees shipments they are involved in", async () => {
   assert.deepEqual((await ids("buyerA")).sort(), [salmon]);
   assert.deepEqual((await ids("buyerB")).sort(), [dairy]);
   assert.ok((await ids("inspector")).includes(salmon));
-  assert.deepEqual(await ids("otherImporter"), []);
+  assert.deepEqual(await ids("otherSupplier"), []);
   assert.equal((await call("/shipments")).status, 401);
 });
 
@@ -155,10 +159,11 @@ test("each participant only sees shipments they are involved in", async () => {
 
 test("only the current holder records readings and issue reports", async () => {
   const sensorId = encodeBytes32String("SENS-Q");
-  const id = Number(await deployed("ShipmentCustody", p.importer.signer).nextId());
-  await send("importer", "createContainer", sensorId);
-  await send("importer", "addBatch", id, p.buyerA.address, p.inspector.address, 40, 15, sensorId);
-  await send("importer", "initiateTransfer", id, p.carrier.address, OK_CHECK);
+  const id = Number(await deployed("ShipmentCustody", p.supplier.signer).nextId());
+  await send("supplier", "createContainer", sensorId, AUTO_NUMBER);
+  await send("supplier", "addBatch", id, p.buyerA.address, p.inspector.address, 40, 15, sensorId);
+  await send("supplier", "recordSeal", id, SEAL);
+  await send("supplier", "initiateTransfer", id, p.carrier.address, OK_CHECK);
   await send("carrier", "acceptTransfer", id, OK_CHECK);
 
   const r1 = await call(`/shipments/${id}/readings`, { token: p.carrier.token, body: { tempC: 3.2, note: "Hold 2 probe" } });
@@ -172,7 +177,7 @@ test("only the current holder records readings and issue reports", async () => {
   assert.deepEqual(issue.body.digest, { readings: 2, maxTempC: 5.8, issues: 1, unrefrigeratedMinutes: 25 });
 
   assert.equal((await call(`/shipments/${id}/readings`, { token: p.handler.token, body: { tempC: 3 } })).status, 403);
-  assert.equal((await call(`/shipments/${id}/issues`, { token: p.importer.token, body: { category: "delay", description: "late" } })).status, 403);
+  assert.equal((await call(`/shipments/${id}/issues`, { token: p.supplier.token, body: { category: "delay", description: "late" } })).status, 403);
   assert.equal((await call(`/shipments/${id}/readings`, { token: p.carrier.token, body: { tempC: 99 } })).status, 400);
   assert.equal(
     (await call(`/shipments/${id}/readings`, { token: p.carrier.token, body: { tempC: 3, takenAt: "2099-01-01T00:00:00Z" } })).status,
@@ -203,7 +208,7 @@ test("both sides seal their notes; the checkpoint trail shows them, and the hash
   const inSeal = await call(`/shipments/${id}/seal`, { token: p.handler.token, body: { direction: "in", note: "Cartons warm to the touch" } });
   await send("handler", "acceptTransfer", id, { ...OK_CHECK, tempTenthsC: 71, unrefrigeratedMinutes: 10, issues: true, notesHash: inSeal.body.notesHash });
 
-  const view = await call(`/shipments/${id}`, { token: p.importer.token });
+  const view = await call(`/shipments/${id}`, { token: p.supplier.token });
   const leg1 = view.body.checkpoints.find((c: any) => c.stage === 1);
   assert.equal(leg1.outgoing.by, p.carrier.address);
   assert.equal(leg1.outgoing.tempC, 5.2);

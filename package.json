@@ -12,7 +12,8 @@
     "test:contracts": "npm test -w contracts",
     "seed": "tsx services/common/scripts/seed-demo.ts",
     "web": "npm run dev -w frontend",
-    "test:all": "bash scripts/test-all.sh"
+    "test:all": "bash scripts/test-all.sh",
+    "slither": "bash scripts/slither-check.sh"
   },
   "devDependencies": {
     "tsx": "^4.23.15"

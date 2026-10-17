@@ -2,7 +2,7 @@ import { useAuth } from "../auth";
 import { AdminDashboard } from "./dashboards/AdminDashboard";
 import { BuyerDashboard } from "./dashboards/BuyerDashboard";
 import { CustodianDashboard } from "./dashboards/CustodianDashboard";
-import { ImporterDashboard } from "./dashboards/ImporterDashboard";
+import { SupplierDashboard } from "./dashboards/SupplierDashboard";
 import { InspectorDashboard } from "./dashboards/InspectorDashboard";
 
 export function Dashboard() {
@@ -10,8 +10,8 @@ export function Dashboard() {
   switch (session?.role) {
     case "ADMIN":
       return <AdminDashboard />;
-    case "IMPORTER":
-      return <ImporterDashboard />;
+    case "SUPPLIER":
+      return <SupplierDashboard />;
     case "CARRIER":
     case "HANDLER":
     case "COLD_STORE":
