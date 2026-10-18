@@ -260,6 +260,13 @@ test("the handler signs the container in and finds the salmon warm; QA sees it w
   await qa.getByLabel("Resolution note").fill("Cargo's own reefer export shows 6 minutes at 6.5 °C; Cargo responsible.");
   await qa.getByRole("button", { name: "Sign and submit resolution" }).click();
   await qa.getByText(/^Signed on-chain/).waitFor({ timeout: 30_000 });
+
+  // Cargo still sees the container it handed on, with its stage's verdict and QA's ruling.
+  await pages.carrier.goto(`${BASE}/app`);
+  const handed = pages.carrier.locator("section", { hasText: "Handled by you" });
+  await handed.getByRole("link", { name: CONTAINER }).waitFor({ timeout: 30_000 });
+  await handed.getByText("Upheld").first().waitFor({ timeout: 30_000 });
+  await shot(pages.carrier, "08b-cargo-handled-by-you");
 });
 
 test("5 minutes on the dock, the cold store unloads, two reefer trucks deliver, and the buyers sign in", async () => {
@@ -284,6 +291,10 @@ test("5 minutes on the dock, the cold store unloads, two reefer trucks deliver, 
   await travel(10 * 60); // 10 minutes on the road
   await checkAndHandOver(truck, /Batch #1/, /Check & deliver to buyer/, "8.9");
   await checkAndHandOver(truck, /Batch #2/, /Check & deliver to buyer/, "3.6");
+
+  // The cold store still sees the batches it handed to the trucks.
+  await cold.goto(`${BASE}/app`);
+  await cold.locator("section", { hasText: "Handled by you" }).getByRole("link", { name: /Batch #1/ }).waitFor({ timeout: 30_000 });
 
   const tbBuyer = await signInAs("tbBuyer", account(9));
   await inspectAndAccept(tbBuyer, /Batch #1/, "8.7", { withIssues: true, shot: "10-buyer-delivery-check" });

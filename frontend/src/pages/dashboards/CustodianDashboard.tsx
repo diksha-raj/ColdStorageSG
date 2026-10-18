@@ -1,6 +1,7 @@
 // Cargo, the destination freight handler, the cold store and the reefer truck share one dashboard:
 // sign in what's handed to you, cover what you hold with your own sensor, and sign it off to the
-// next party. Cargo also opens containers; the cold store unloads them.
+// next party. Cargo also opens containers; the cold store unloads them. What you've handed on stays
+// listed, with your stage's verdict and any claim against it.
 import { hexlify, toUtf8Bytes } from "ethers";
 import { Plus, X } from "lucide-react";
 import { type FormEvent, useState } from "react";
@@ -9,12 +10,12 @@ import { HandoverActions } from "../../components/HandoverActions";
 import { QualityLog } from "../../components/QualityLog";
 import { type SensorChoice, SensorPicker, emptySensorChoice, registerSensor, sensorChoiceReady } from "../../components/SensorPicker";
 import { ShipmentCard } from "../../components/ShipmentCard";
-import { ActionFeedback, Button, Card, Empty, Field, Loading, Notice, PageHeader, inputClass } from "../../components/ui";
+import { ActionFeedback, Button, Card, Empty, Field, Loading, Notice, PageHeader, StatusBadge, inputClass } from "../../components/ui";
 import { api } from "../../lib/api";
 import { sendTx } from "../../lib/chain";
-import { ROLE_LABELS, type Role, containerNumberProblem, sameAddress } from "../../lib/format";
+import { LEG_NAMES, REASON_LABELS, ROLE_LABELS, type Role, containerNumberProblem, sameAddress } from "../../lib/format";
 import { useAction, useApi } from "../../lib/hooks";
-import type { Unit } from "../../lib/types";
+import type { BatchCertificate, Unit } from "../../lib/types";
 
 const INTRO: Partial<Record<Role, string>> = {
   CARRIER: "Open a container and register its sensor, receive the supplier's batches into it, then seal it and hand it to the destination freight handler.",
@@ -23,9 +24,13 @@ const INTRO: Partial<Record<Role, string>> = {
   TRUCK: "Sign in batches at pickup, register your truck's sensor, log temperatures on the road, and deliver each one to its buyer.",
 };
 
+/** The stage each custodian role holds a batch for. */
+const MY_STAGE: Partial<Record<Role, number>> = { CARRIER: 1, HANDLER: 2, COLD_STORE: 3, TRUCK: 4 };
+
 export function CustodianDashboard({ role }: { role: Role }) {
   const { session } = useAuth();
   const { data: units, loading, reload } = useApi<Unit[]>("custody", "/shipments", 4000);
+  const { data: certs } = useApi<BatchCertificate[]>("certificate", "/certificates", 8000);
   const [opening, setOpening] = useState(false);
   const me = session!.wallet;
 
@@ -33,6 +38,16 @@ export function CustodianDashboard({ role }: { role: Role }) {
   // Batches inside a container are shown within it; unloaded containers are done.
   const holding = (units ?? []).filter((u) => sameAddress(u.custodian, me) && !u.unloadedAt && !u.inContainer && u.stage !== "Delivered");
   const inside = (containerId: number) => (units ?? []).filter((u) => u.kind === "batch" && u.containerId === containerId);
+
+  // Everything you held and have handed on (or unloaded). Batches you carried inside a container are
+  // shown within it; batches you handled singly (the cold store's, the truck's) on their own.
+  const current = new Set([...incoming, ...holding].map((u) => u.id));
+  const handled = (units ?? [])
+    .filter((u) => u.holders.some((h) => sameAddress(h, me)) && !current.has(u.id) && !(u.kind === "batch" && u.inContainer))
+    .sort((a, b) => b.id - a.id);
+  const handledContainers = new Set(handled.filter((u) => u.kind === "container").map((u) => u.id));
+  const shownInContainer = (u: Unit) => u.kind === "batch" && !!u.containerId && handledContainers.has(u.containerId) && role !== "COLD_STORE" && role !== "TRUCK";
+  const myStage = MY_STAGE[role];
 
   return (
     <div className="space-y-6">
@@ -89,9 +104,50 @@ export function CustodianDashboard({ role }: { role: Role }) {
               </div>
             )}
           </Card>
+          <Card title="Handled by you" subtitle="Shipments you've handed on: where they are now, and how your stage was judged.">
+            {handled.length === 0 ? (
+              <Empty>Nothing handed on yet.</Empty>
+            ) : (
+              <div className="space-y-3">
+                {handled
+                  .filter((u) => !shownInContainer(u))
+                  .map((u) => (
+                    <ShipmentCard key={u.id} unit={u} status={u.kind === "batch" ? <YourStage batchId={u.id} stage={myStage} certs={certs} /> : undefined}>
+                      {u.kind === "container" && role !== "COLD_STORE" && inside(u.id).length > 0 && (
+                        <div className="space-y-2">
+                          {inside(u.id).map((b) => (
+                            <ShipmentCard key={b.id} unit={b} status={<YourStage batchId={b.id} stage={myStage} certs={certs} />} />
+                          ))}
+                        </div>
+                      )}
+                    </ShipmentCard>
+                  ))}
+              </div>
+            )}
+          </Card>
         </>
       )}
     </div>
+  );
+}
+
+/** Your stage's verdict on a batch, and QA's ruling if it was flagged. */
+function YourStage({ batchId, stage, certs }: { batchId: number; stage?: number; certs: BatchCertificate[] | null }) {
+  const cert = certs?.find((c) => c.batchId === batchId);
+  const st = stage === undefined ? undefined : cert?.stages.find((x) => x.stage === stage);
+  if (!st) return null;
+  const claim = cert!.claims.find((c) => c.leg === stage);
+  const label = `Your stage (${LEG_NAMES[stage!]})`;
+  if (!st.checkpointDone || !st.sensorDone) {
+    return <span className="text-xs text-muted">{label}: {st.checkpointDone ? "readings being verified" : "not handed over yet"}</span>;
+  }
+  return (
+    <span className="flex flex-wrap items-center justify-end gap-1.5 text-xs">
+      <span className="text-muted">{label}:</span>
+      <StatusBadge status={st.reasons.length ? "flagged" : "pass"} />
+      {st.reasons.length > 0 && <span className="text-fail">{st.reasons.map((r) => REASON_LABELS[r]).join("; ")}</span>}
+      {claim && <StatusBadge status={claim.resolution?.outcome ?? "open"} />}
+    </span>
   );
 }
 
